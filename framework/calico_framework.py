@@ -15,23 +15,22 @@
 # limitations under the License.
 """calico-dcos-installer-scheduler
 
-Install calico in a DCOS cluster
+Install calico in a Mesos cluster.
 
 Usage:
   calico_framework.py
 
 Dockerized:
-  docker run calico/calico-mesos-framework <args...>
+  docker run calico/calico-mesos-framework
 
 Description:
-  Add or remove containers to Calico networking, manage their IP addresses and profiles.
-  All these commands must be run on the host that contains the container.
+  Mesos framework used to install Calico in a Mesos cluster..
 """
+import json
 import os
 import mesos.interface
 from mesos.interface import mesos_pb2
 import mesos.native
-from docopt import docopt
 from calico_utils import _setup_logging
 from tasks import (Task, TaskRunEtcdProxy, TaskInstallDockerClusterStore,
                    TaskInstallNetmodules, TaskRestartComponents,
@@ -39,7 +38,6 @@ from tasks import (Task, TaskRunEtcdProxy, TaskInstallDockerClusterStore,
 from constants import LOGFILE
 
 _log = _setup_logging(LOGFILE)
-
 
 # TODO
 # o  Need to check CPU/Mem for each calico task
@@ -70,13 +68,37 @@ _log = _setup_logging(LOGFILE)
 TASK_CLASSES = [TaskRunEtcdProxy, TaskInstallNetmodules,
                 TaskInstallDockerClusterStore, TaskRestartComponents,
                 TaskRunCalicoNode, TaskRunCalicoLibnetwork]
+TASK_CLASSES_BY_NAME = {cls.name: cls for cls in TASK_CLASSES}
 
 
+class ZkDatastore(object):
+    def __init__(self, uri):
+        self.uri = uri
 
+    def load_tasks(self, agent):
+        tasks = @@@@ READ BLOB FOR AGENT   @ calico-installer/<version>/agent/<agent_id>
+        tasks_dict = json.loads(tasks)
+        tasks = {
+            name: TASK_CLASSES_BY_NAME[name].from_dict(task_dict)
+            for name, task_dict in tasks_dict.iteritems()
+        }
+        return tasks
+
+    def store_tasks(self, tasks):
+        tasks_dict = {
+            name: task.to_dict() for name, task in tasks.iteritems()
+        }
+        tasks_json = json.dumps(tasks_dict)
+        @@@ STORE BLOB FOR AGENT
 
 
 class Agent(object):
-    def __init__(self, agent_id):
+    def __init__(self, scheduler, agent_id):
+        self.scheduler = scheduler
+        """
+        The Calico installer scheduler.
+        """
+
         self.agent_id = agent_id
         """
         The agent ID.
@@ -87,7 +109,7 @@ class Agent(object):
         Whether this agent has sync'd with the Master.
         """
 
-        self.tasks = {cls.name: None for cls in TASK_CLASSES}
+        self.tasks = {}
         """
         Tasks for each task type (we only ever have one of each running on an
         agent.
@@ -102,7 +124,7 @@ class Agent(object):
     def __repr__(self):
         return "Agent(%s)" % self.id
 
-    def handle_offer(self, offer):
+    def handle_offer(self, driver, offer):
         """
         Ask the agent if it wants to handle the supplied offer.
         :return:  None if the offer is not accepted, otherwise return the task
@@ -151,9 +173,15 @@ class Agent(object):
         the tasks ensure that we do not restart again - so we will not end up
         in a restart loop.
         """
-        #Don't accept anything at the moment
-        _log.info("Receieved offer but not doing anything with it")
-        return None
+        if not self.agent_syncd:
+            # The agent is not yet sync'd.  If status updates have not been
+            # triggered then trigger them now.
+            self.trigger_resync(driver)
+
+            # If there is nothing to resync, the agent_syncd flag may be set,
+            # so check it again to decide whether we have to wait.
+            if not self.agent_syncd:
+                return None
 
         if self.task_can_be_offered(TaskRunEtcdProxy, offer):
             # We have no etcd task running - start one now.
@@ -193,17 +221,17 @@ class Agent(object):
         # -  If a restart is required, kick off the restart task.
         # -  Otherwise, make sure our restarting flag is reset, and continue
         #    with the rest of the installation.
-        restart_required = \
-            self.tasks[TaskInstallNetmodules].restart_required() or \
-            self.tasks[TaskInstallDockerClusterStore].restart_required()
-        if not restart_required:
-            self.restarting = False
+        restart_agent = self.tasks[TaskInstallNetmodules].restart_required()
+        restart_docker = self.tasks[TaskInstallDockerClusterStore].restart_required()
+        restart_required = restart_agent or restart_docker
+        self.restarting = self.restarting and restart_required
+
         if restart_required and self.task_can_be_offered(TaskRestartComponents, offer):
             # We require a restart and we haven't already scheduled one.
             _log.info("Schedule a restart task")
             return self.new_task(TaskRestartComponents,
-                                 restart_agent=self.tasks[TaskInstallNetmodules].restart_required(),
-                                 restart_docker=self.tasks[TaskInstallDockerClusterStore].restart_required())
+                                 restart_agent=restart_agent,
+                                 restart_docker=restart_docker)
 
         # At this point we only continue when a restart is no longer required.
         if restart_required:
@@ -224,6 +252,29 @@ class Agent(object):
 
         return None
 
+    def trigger_resync(self, driver):
+        """
+        Trigger a resync of the tasks persisted in ZooKeeper.
+        :param driver:
+        :return:
+        """
+        if not self.scheduler.zk:
+            _log.info("No ZK for persistent state.")
+            self.agent_syncd = True
+            return
+
+        # Query the state of each task that was previously running.  Terminated
+        # tasks do not need to be queried because their state won't have
+        # changed, and the task may have been tidied up.
+        self.tasks = self.scheduler.zk.load_tasks()
+        task_statuses = [task.get_task_status(self)
+                         for task in self.tasks.itervalues() if task.running()]
+        if not task_statuses:
+            _log.info("No running tasks, assume sync'd")
+            self.agent_syncd = True
+            return
+        driver.reconcileTasks(task_statuses)
+
     def new_task(self, task_class, *args, **kwargs):
         """
         Create a new Task of the supplied type, and update our cache to store
@@ -231,8 +282,13 @@ class Agent(object):
         :param task_class:
         :return: The new task.
         """
-        task = task_class(self, *args, **kwargs)
+        task = task_class(*args, **kwargs)
         self.tasks[task.name] = task
+
+        # Persist these tasks to the datastore.
+        if self.scheduler.zk:
+            self.scheduler.zk.store_tasks(self.tasks)
+
         return task
 
     def task_can_be_offered(self, task_class, offer):
@@ -257,7 +313,7 @@ class Agent(object):
         :param task_class:
         :return: True if the task needs scheduling.  False otherwise.
         """
-        task = self.tasks[task_class.name]
+        task = self.tasks.get(task_class.name)
         if not task:
             return True
         if task.persistent:
@@ -271,7 +327,7 @@ class Agent(object):
         :param task_class:
         :return:
         """
-        task = self.tasks[task_class.name]
+        task = self.tasks.get(task_class.name)
         if not task:
             return False
         return task.running()
@@ -282,47 +338,48 @@ class Agent(object):
         :param task_class:
         :return:
         """
-        task = self.tasks[task_class.name]
+        task = self.tasks.get(task_class.name)
         if not task:
             return False
         return task.finished()
 
-    def handle_update(self, update):
+    def handle_update(self, driver, update):
         """
-
+        Handle a task update.  If we were resync-ing then check if we have
+        completed the sync.
         :param update:
-        :return:
         """
         # Extract the task name from the update and update the appropriate
         # task.  Updates for the restart task need special case processing
         name = Task.name_from_task_id(update.task_id)
 
-        # Lookup the existing task, if there is one.  There should always
-        # be an entry in the dictionary, but it might be None if this instance
-        # of the framework did not schedule it.
-        task = self.tasks[name]
-        if not task:
-            task_class = next(cls for cls in TASK_CLASSES if cls.name == name)
-            task = self.new_task(task_class)
-        task.update(update)
+        # Lookup the existing task, if there is one.
+        task = self.tasks.get(name)
+        if not task or task.task_id != update.task_id:
+            _log.debug("Task is not recognised - ignoring")
+            return
 
-        # If the task is not running, make sure the task is deleted so that it
-        # can be re-scheduled when necessary.
-        #TODO
+        # Update the task.
+        task.update(update)
 
         # An update to indicate a restart task is no longer running requires
         # some additional processing to re-spawn the install tasks as this
         # ensures the installation completed successfully.
         if (name == TaskRestartComponents.name) and not task.running():
             _log.debug("Handle update for restart task")
-            self.tasks[TaskInstallNetmodules.name] = None
-            self.tasks[TaskInstallDockerClusterStore] = None
+            del(self.tasks[TaskInstallNetmodules.name])
+            del(self.tasks[TaskInstallDockerClusterStore])
+
+        # If we were resyncing then check if all of our tasks are now syncd.
+        if not self.agent_syncd and all(task.clean for task in self.tasks.values()):
+            self.agent_syncd = True
 
 
 class CalicoInstallerScheduler(mesos.interface.Scheduler):
-    def __init__(self, max_concurrent_restarts=1):
+    def __init__(self, max_concurrent_restarts=1, zk=None):
         self.agents = {}
         self.max_concurrent_restart = max_concurrent_restarts
+        self.zk = zk
 
     def can_restart(self, agent):
         """
@@ -336,6 +393,19 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
             return True
         num_restarting = sum(1 for a in self.agents if a.restarting)
         return num_restarting < self.max_num_concurrent_restart
+
+    def get_agent(self, agent_id):
+        """
+        Return the Agent based on the agent ID.  If the agent is not in our
+        cache then create an entry for it.
+        :param agent_id:
+        :return:
+        """
+        agent = self.agents.get(agent_id)
+        if not agent:
+            agent = Agent(self, agent_id)
+            self.agents[agent_id] = agent
+        return agent
 
     def registered(self, driver, frameworkId, masterInfo):
         """
@@ -353,19 +423,6 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         for agent in self.agents.itervalues():
             agent.agent_syncd = False
 
-    def get_agent(self, agent_id):
-        """
-        Return the Agent based on the agent ID.  If the agent is not in our
-        cache then create an entry for it.
-        :param agent_id:
-        :return:
-        """
-        agent = self.agents.get(agent_id)
-        if not agent:
-            agent = Agent(agent_id)
-            self.agents[agent_id] = agent
-        return agent
-
     def resourceOffers(self, driver, offers):
         """
         Triggered when the framework is offered resources by mesos.
@@ -374,12 +431,12 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         # agent it is running on.
         for offer in offers:
             agent = self.get_agent(offer.slave_id.value)
-            task = agent.handle_offer(offer)
+            task = agent.handle_offer(driver, offer)
             if not task:
                 driver.declineOffer(offer.id)
                 continue
 
-            print "Launching Task %s" % task
+            _log.info("Launching Task %s", task)
             operation = mesos_pb2.Offer.Operation()
             operation.launch.task_infos.extend([task.as_new_mesos_task()])
             operation.type = mesos_pb2.Offer.Operation.LAUNCH
@@ -390,10 +447,9 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         Triggered when the Framework receives a task Status Update from the
         Executor
         """
-        # Extract the task ID.  The format of the ID includes the ID of the
-        # agent it is running on.
+        # Pass the update to the appropriate Agent.
         agent = self.get_agent(update.slave_id)
-        agent.handle_update(update)
+        agent.handle_update(driver, update)
 
     def slaveLost(self, driver, slave_id):
         """
@@ -405,19 +461,18 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         agent = self.get_agent(slave_id)
         agent.agent_syncd = False
 
-
-    #TODO
-    # offerRescinded
-    #
-
-
-class NotEnoughResources(Exception):
-    pass
+    def offerRescinded(self, driver, offer_id):
+        # Not obvious if this is actually required.  We probably need to track
+        # offer to speed things up, but I don't believe it's strictly necessary.
+        _log.info("Offer rescinded for offer ID %s", offer_id)
 
 
 if __name__ == "__main__":
-    # arguments = docopt(__doc__)
+    # Extract relevant configuration from our environment
     master_ip = os.getenv('MESOS_MASTER', 'mesos.master')
+    zk = os.getenv('ZK', None)
+    max_concurrent_restarts = os.getenv('MAX_CONCURRENT_RESTARTS', 1)
+
     print "Connecting to Master: ", master_ip
 
     framework = mesos_pb2.FrameworkInfo()
@@ -426,7 +481,9 @@ if __name__ == "__main__":
     framework.principal = "calico-installation-framework"
     framework.failover_timeout = 604800
 
-    scheduler = CalicoInstallerScheduler()
+    zk = ZkDatastore(@@@uri)
+    scheduler = CalicoInstallerScheduler(
+        max_concurrent_restarts=max_concurrent_restarts, zk=zk)
 
     _log.info("Launching")
     driver = mesos.native.MesosSchedulerDriver(scheduler,

@@ -1,28 +1,27 @@
-import mesos.interface
 from mesos.interface import mesos_pb2
-import mesos.native
+import uuid
 from constants import VERSION, TASK_CPUS, TASK_MEM
 
 
-class TaskUpdateError(Exception):
-    """
-    There was a problem with a TaskUpdate.
-    """
-    pass
-
-
 class Task(object):
-    def __init__(self, agent):
-        self.agent = agent
-        self.state = mesos_pb2.TASK_STAGING
+    def __init__(self, task_id=None, state=mesos_pb2.TASK_STAGING):
+        self.state = state
         self.executor_id = None
         self.healthy = True
 
-        # Construct a task ID from the task name, version and agent ID.
-        self.task_id = "%s-%s-%s" % (self.name, VERSION, self.agent.agent_id)
+        # Create a task ID if not supplied.
+        self.task_id = task_id or "%s-%s-%s" % (self.name,
+                                                VERSION,
+                                                uuid.uuid4())
+
+        self.clean = True
+        """
+        Tasks loaded from the persistent store are not considered clean until
+        the status has been updated from a query.
+        """
 
     def __repr__(self):
-        return self.task_id
+        return "Task(%s)" % self.task_id
 
     def __str__(self):
         return self.__repr__()
@@ -71,6 +70,38 @@ class Task(object):
 
     def update(self, update):
         self.state = update.state
+        self.clean = True
+
+    def get_task_status(self, agent):
+        """
+        Return a TaskStatus object for this Task.
+        :return: A TaskStatus
+        """
+        task_status = mesos_pb2.TaskStatus()
+        task_status.slave_id.value = agent.agent_id
+        task_status.task_id.value = self.task_id
+        task_status.state = self.state
+        return task_status
+
+    def to_dict(self):
+        task_dict = {
+            "task_id": self.task_id,
+            "state": self.state
+        }
+        return task_dict
+
+    @classmethod
+    def from_dict(cls, task_dict):
+        task = cls(task_id=task_dict["task_id"],
+                   state=task_dict["state"])
+
+        # Tasks loaded from storage that were previously running are not
+        # considered to be clean.  These tasks should be queried, and the
+        # state updated from the query result.  If a task was not
+        # previously running then it can be considered clean as the state
+        # is terminal and cannot change.
+        task.clean = not task.running()
+        return task
 
     @classmethod
     def can_accept_offer(self, offer):
@@ -84,18 +115,13 @@ class Task(object):
         return True
 
     @classmethod
-    def agent_id_from_task_id(cls, task_id):
-        _name, _version, agent_id = task_id.split("-", 2)
-        return agent_id
-
-    @classmethod
     def version_from_task_id(cls, task_id):
-        _name, version, _agent_id = task_id.split("-", 2)
+        _name, version, _uuid = task_id.split("-", 2)
         return version
 
     @classmethod
     def name_from_task_id(cls, task_id):
-        name, _version, _agent_id = task_id.split("-", 2)
+        name, _version, _uuid = task_id.split("-", 2)
         return name
 
 
@@ -111,6 +137,8 @@ class TaskRunEtcdProxy(Task):
     name = "calico-install-etcd-proxy"
     persistent = True
 
+    def cmd(self):
+        return "ip addr && sleep 300"
 
 class TaskInstallNetmodules(Task):
     """
@@ -150,6 +178,9 @@ class TaskInstallNetmodules(Task):
         #TODO
         return False
 
+    def cmd(self):
+        return "ip addr"
+
 
 class TaskInstallDockerClusterStore(Task):
     """
@@ -186,6 +217,9 @@ class TaskInstallDockerClusterStore(Task):
         #TODO
         return False
 
+    def cmd(self):
+        return "ip addr"
+
 
 class TaskRestartComponents(Task):
     """
@@ -203,10 +237,15 @@ class TaskRestartComponents(Task):
     name = "calico-restart-agent"
     persistent = False
 
-    def __init__(self, agent, restart_agent=False, restart_docker=False):
+    def __init__(self, agent, task_id=None, state=mesos_pb2.TASK_STAGING,
+                 restart_agent=False, restart_docker=False):
         self.restart_agent = restart_agent
         self.restart_docker = restart_docker
-        super(self, TaskRestartComponents).__init__(agent)
+        super(self, TaskRestartComponents).__init__(agent, task_id=task_id,
+                                                    state=state)
+
+    def cmd(self):
+        return "ip addr"
 
 
 class TaskRunCalicoNode(Task):
@@ -217,6 +256,9 @@ class TaskRunCalicoNode(Task):
     name = "calico-node"
     persistent = True
 
+    def cmd(self):
+        return "ip addr && sleep 300"
+
 
 class TaskRunCalicoLibnetwork(Task):
     """
@@ -225,4 +267,7 @@ class TaskRunCalicoLibnetwork(Task):
     """
     name = "calico-libnetwork"
     persistent = True
+
+    def cmd(self):
+        return "ip addr && sleep 300"
 
