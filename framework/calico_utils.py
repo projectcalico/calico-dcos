@@ -2,6 +2,7 @@ import os
 import logging
 import logging.handlers
 import errno
+import re
 
 
 def _setup_logging(logfile):
