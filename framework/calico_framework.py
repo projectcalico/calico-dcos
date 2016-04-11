@@ -417,7 +417,7 @@ class NotEnoughResources(Exception):
 
 if __name__ == "__main__":
     # arguments = docopt(__doc__)
-    master_ip = os.getenv('MASTER_IP', 'mesos.master')
+    master_ip = os.getenv('MESOS_MASTER', 'mesos.master')
     print "Connecting to Master: ", master_ip
 
     framework = mesos_pb2.FrameworkInfo()
