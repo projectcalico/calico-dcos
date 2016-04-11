@@ -57,6 +57,7 @@ class Task(object):
 
     def failed(self):
         return self.state in (mesos_pb2.TASK_LOST,
+                              mesos_pb2.TASK_ERROR,
                               mesos_pb2.TASK_KILLED,
                               mesos_pb2.TASK_FAILED)
 
@@ -65,6 +66,7 @@ class Task(object):
 
     def running(self):
         return self.state in (mesos_pb2.TASK_STAGING,
+                              mesos_pb2.TASK_STARTING,
                               mesos_pb2.TASK_RUNNING)
 
     def update(self, update):
@@ -147,6 +149,7 @@ class TaskInstallNetmodules(Task):
         """
         #TODO
         return False
+
 
 class TaskInstallDockerClusterStore(Task):
     """

@@ -39,7 +39,6 @@ from tasks import (Task, TaskRunEtcdProxy, TaskInstallDockerClusterStore,
 from constants import LOGFILE
 
 _log = _setup_logging(LOGFILE)
-NEXT_AVAILABLE_TASK_ID = 0
 
 
 # TODO
@@ -51,16 +50,41 @@ NEXT_AVAILABLE_TASK_ID = 0
 # o  Can we start a task with the same task ID of a task that is running, or failed, or completed etc?
 #    or do we need to delete a task with the same ID first.
 # o  What happens if a framework is killed
+# o  Can we determine what slave the framework is running on?  That would help limit the issues
+#    caused by restart - worst case scenario is we keep restarting the node that runs the framework...
+#    kill one agent, framework moves to another, then we next that agent...and so on.  Shouldn't actually
+#    matter, but it would slow things down.
+# o  Framework could ultimately have a web UI - so launch with a known DNS entry so you can point
+#    a browser to determine current calico status.  Tasks could perform periodic checks on calico
+# o  Handle loss of framework
+# o  Need to use zk as backend store because using fixed task names is not viable
+# o  Suppress offers when calico services are running
+# o  Revive offers when calico services are not running
+
+# Need the following input parms:
+# -  Number of agents that can be restarted at once
+# -  Etcd SRV address
+# -  Etcd proxy port (maybe)
+
 
 TASK_CLASSES = [TaskRunEtcdProxy, TaskInstallNetmodules,
                 TaskInstallDockerClusterStore, TaskRestartComponents,
                 TaskRunCalicoNode, TaskRunCalicoLibnetwork]
+
+
+
+
 
 class Agent(object):
     def __init__(self, agent_id):
         self.agent_id = agent_id
         """
         The agent ID.
+        """
+
+        self.agent_syncd = False
+        """
+        Whether this agent has sync'd with the Master.
         """
 
         self.tasks = {cls.name: None for cls in TASK_CLASSES}
@@ -103,11 +127,10 @@ class Agent(object):
         restart check to see if anything needs restarting - and simply no-op if
         nothing needs restarting.  However, since we want to limit how many
         agents are restarting at any one time, this slows down how quickly we
-        can perform the subsequent installation tasks.  Instead, we have the
-        install tasks indicate whether a restart is required.  If a restart is
-        required we will do the restart, otherwise we won't - thus agents that
-        don't need a restart will not get blocked behind an agent installation
-        that does require a restart.
+        can perform the subsequent steps.  Instead, we have the install tasks
+        indicate whether a restart is required.  If a restart is required we
+        will do the restart, otherwise we won't - thus agents that don't need a
+        restart will not get blocked behind an agent installation that does.
 
         Since we are possibly restarting docker and/or the agent, we
         need to consider what happens to these tasks when the services
@@ -128,6 +151,10 @@ class Agent(object):
         the tasks ensure that we do not restart again - so we will not end up
         in a restart loop.
         """
+        #Don't accept anything at the moment
+        _log.info("Receieved offer but not doing anything with it")
+        return None
+
         if self.task_can_be_offered(TaskRunEtcdProxy, offer):
             # We have no etcd task running - start one now.
             _log.info("Install and run etcd proxy")
@@ -292,7 +319,7 @@ class Agent(object):
             self.tasks[TaskInstallDockerClusterStore] = None
 
 
-class CalicoScheduler(mesos.interface.Scheduler):
+class CalicoInstallerScheduler(mesos.interface.Scheduler):
     def __init__(self, max_concurrent_restarts=1):
         self.agents = {}
         self.max_concurrent_restart = max_concurrent_restarts
@@ -315,6 +342,16 @@ class CalicoScheduler(mesos.interface.Scheduler):
         Callback used when the framework is successfully registered.
         """
         _log.info("REGISTERED: with framework ID %s", frameworkId.value)
+
+    def reregistered(self, driver, frameworkId, masterInfo):
+        """
+        Callback used when the framework is successfully re-registered.
+
+        We mark all agents as un-sync'd to force a resync of the local cache.
+        """
+        _log.info("REREGISTERED: with framework ID %s", frameworkId.value)
+        for agent in self.agents.itervalues():
+            agent.agent_syncd = False
 
     def get_agent(self, agent_id):
         """
@@ -358,6 +395,21 @@ class CalicoScheduler(mesos.interface.Scheduler):
         agent = self.get_agent(update.slave_id)
         agent.handle_update(update)
 
+    def slaveLost(self, driver, slave_id):
+        """
+        When a slave is lost, mark it as un-sync'd so that we end up requerying
+        the current state of existing tasks.
+        :param driver:
+        :param slave_id:
+        """
+        agent = self.get_agent(slave_id)
+        agent.agent_syncd = False
+
+
+    #TODO
+    # offerRescinded
+    #
+
 
 class NotEnoughResources(Exception):
     pass
@@ -372,8 +424,9 @@ if __name__ == "__main__":
     framework.user = ""  # Have Mesos fill in the current user.
     framework.name = "Calico installation framework"
     framework.principal = "calico-installation-framework"
+    framework.failover_timeout = 604800
 
-    scheduler = CalicoScheduler()
+    scheduler = CalicoInstallerScheduler()
 
     _log.info("Launching")
     driver = mesos.native.MesosSchedulerDriver(scheduler,
