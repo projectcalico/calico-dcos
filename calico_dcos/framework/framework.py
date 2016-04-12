@@ -156,10 +156,10 @@ class Agent(object):
                   that needs scheduling.
 
         Installation tasks need to be performed in a particular order:
-        -  Firstly etcd proxy needs to be running.  In parallel with this we
+        -  Firstly etcd-proxy needs to be running.  In parallel with this we
            can install netmodules (with Calico plugin).
-        -  Once etcd is installed we can update the Docker configuration to
-           use etcd as its cluster store (we don't need to wait for the
+        -  Once etcd-proxy is installed we can update the Docker configuration to
+           use etcd-proxy as its cluster store (we don't need to wait for the
            netmodules install to complete).
         -  If the netmodules or docker tasks indicated that a restart is
            required then restart the appropriate componenets.  See note below.
@@ -388,8 +388,21 @@ class Agent(object):
             _log.debug("Task is not recognised - ignoring")
             return
 
+        _log.debug("TASK_UPDATE - %s: %s",
+                mesos_pb2.TaskState.Name(update.state),
+                task)
+
         # Update the task.
         task.update(update)
+
+        if task.failed():
+            _log.error("\t%s is in unexpected state %s with message '%s'",
+                   task, mesos_pb2.TaskState.Name(update.state), update.message)
+            _log.error("\tData:  %s", repr(str(update.data)))
+            _log.error("\tSent by: %s", mesos_pb2.TaskStatus.Source.Name(update.source))
+            _log.error("\tReason: %s", mesos_pb2.TaskStatus.Reason.Name(update.reason))
+            _log.error("\tMessage: %s", update.message)
+            _log.error("\tHealthy: %s", update.healthy)
 
         # An update to indicate a restart task is no longer running requires
         # some additional processing to re-spawn the install tasks as this
@@ -397,7 +410,7 @@ class Agent(object):
         if (action == TaskRestartComponents.action) and not task.running():
             _log.debug("Handle update for restart task")
             del(self.tasks[TaskInstallNetmodules.action])
-            del(self.tasks[TaskInstallDockerClusterStore])
+            del(self.tasks[TaskInstallDockerClusterStore.action])
 
         # Persist the updated tasks to the datastore.
         if self.scheduler.zk:
@@ -445,7 +458,7 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         Callback used when the framework is successfully registered.
         """
         _log.info("REGISTERED: with framework ID %s", frameworkId.value)
-        self.zk.set_framework_id(frameworkId.value)
+        # self.zk.set_framework_id(frameworkId.value)
 
     def reregistered(self, driver, frameworkId, masterInfo):
         """
@@ -500,32 +513,3 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         # Not obvious if this is actually required.  We probably need to track
         # offer to speed things up, but I don't believe it's strictly necessary.
         _log.info("Offer rescinded for offer ID %s", offer_id)
-
-
-if __name__ == "__main__":
-    # Extract relevant configuration from our environment
-    master_ip = os.getenv('MESOS_MASTER', 'mesos.master')
-    max_concurrent_restarts = os.getenv('MAX_CONCURRENT_RESTARTS', 1)
-    zk_persist_url = os.getenv('ZK_PERSIST')
-    etcd_service = os.getenv('ETCD_SERVICE_ADDR')
-
-    _log.info("Connecting to Master: %s", master_ip)
-    framework = mesos_pb2.FrameworkInfo()
-    framework.user = ""  # Have Mesos fill in the current user.
-    framework.name = "Calico framework"
-    framework.principal = "calico-framework"
-    framework.id.value = "calico-framework"
-    framework.failover_timeout = 604800
-
-    _log.info("Using zk: %s", zk_persist_url)
-    zk = ZkDatastore(zk_persist_url)
-
-    scheduler = CalicoInstallerScheduler(
-        max_concurrent_restarts=max_concurrent_restarts, zk=zk)
-
-    _log.info("Launching Calico Mesos scheduler")
-    driver = mesos.native.MesosSchedulerDriver(scheduler,
-                                               framework,
-                                               master_ip)
-    driver.start()
-    driver.join()

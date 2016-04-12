@@ -61,6 +61,13 @@ class Task(object):
 
         task.container.type = mesos_pb2.ContainerInfo.MESOS
         task.command.value = self.cmd()
+        task.command.user = "calico"
+
+        uri = task.command.uris.add()
+        # TODO @DanO - paramaterize this through Universe
+        uri.value = "http://172.25.20.11/installer"
+        uri.executable = True
+        uri.cache = True
 
         return task
 
@@ -174,7 +181,7 @@ class TaskRunEtcdProxy(Task):
     persistent = True
 
     def cmd(self):
-        return "ip addr && sleep 30"
+        return "./installer %s" % self.action
 
 
 class TaskInstallNetmodules(Task):
@@ -208,7 +215,7 @@ class TaskInstallNetmodules(Task):
     persistent = False
 
     def cmd(self):
-        return "ip addr"
+        return "./installer %s" % self.action
 
 
 class TaskInstallDockerClusterStore(Task):
@@ -239,7 +246,7 @@ class TaskInstallDockerClusterStore(Task):
     persistent = False
 
     def cmd(self):
-        return "ip addr"
+        return "./installer %s" % self.action
 
 
 class TaskRestartComponents(Task):
@@ -255,14 +262,14 @@ class TaskRestartComponents(Task):
     def __init__(self, task_id=None, state=mesos_pb2.TASK_STAGING,
                  stdout="", restart_options=None):
         self.restart_options = restart_options or set()
-        super(self, TaskRestartComponents).__init__(task_id=task_id,
+        super(TaskRestartComponents, self).__init__(task_id=task_id,
                                                     state=state,
                                                     stdout=stdout)
 
     def cmd(self):
         assert self.restart_options, "Restart task should not be invoked if " \
                                      "no restarts are required"
-        return "ip addr && echo " + " ".join(self.restart_options)
+        return "./installer %s && echo " % self.action + " ".join(self.restart_options)
 
 
 class TaskRunCalicoNode(Task):
@@ -274,7 +281,7 @@ class TaskRunCalicoNode(Task):
     persistent = True
 
     def cmd(self):
-        return "ip addr && sleep 30"
+        return "./installer %s " % self.action
 
 
 class TaskRunCalicoLibnetwork(Task):
@@ -286,5 +293,5 @@ class TaskRunCalicoLibnetwork(Task):
     persistent = True
 
     def cmd(self):
-        return "ip addr && sleep 30"
+        return "./installer %s " % self.action
 

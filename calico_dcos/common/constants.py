@@ -3,7 +3,7 @@ TASK_CPUS = 0.1
 TASK_MEM = 128.0
 
 # Logfiles used by the framework and installer script
-LOGFILE_INSTALLER = '/var/log/calico/calico_installer.log'
+LOGFILE_INSTALLER = './calico_installer.log'
 LOGFILE_FRAMEWORK = '/var/log/calico/calico_framework.log'
 
 # Version of the installer framework
