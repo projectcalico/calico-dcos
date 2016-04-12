@@ -31,6 +31,8 @@ import os
 import mesos.interface
 from mesos.interface import mesos_pb2
 import mesos.native
+from kazoo.client import KazooClient, NoNodeError, NodeExistsError
+from docopt import docopt
 from calico_utils import _setup_logging
 from tasks import (Task, TaskRunEtcdProxy, TaskInstallDockerClusterStore,
                    TaskInstallNetmodules, TaskRestartComponents,
@@ -74,23 +76,56 @@ TASK_CLASSES_BY_NAME = {cls.name: cls for cls in TASK_CLASSES}
 class ZkDatastore(object):
     def __init__(self, uri):
         self.uri = uri
+        self.zk_prefix = "calico"
+        self._zk = KazooClient(hosts=uri)
+        self._zk.start()
 
-    def load_tasks(self, agent):
-        tasks = @@@@ READ BLOB FOR AGENT   @ calico-installer/<version>/agent/<agent_id>
-        tasks_dict = json.loads(tasks)
+    def load_tasks(self, agent_id):
+        try:
+            tasks_str, stat = self._zk.get("/calico/agent/%s" % agent_id)
+        except NoNodeError:
+            tasks_str = "{}"
+        tasks_dict = json.loads(tasks_str)
         tasks = {
             name: TASK_CLASSES_BY_NAME[name].from_dict(task_dict)
             for name, task_dict in tasks_dict.iteritems()
         }
         return tasks
 
-    def store_tasks(self, tasks):
+    def store_tasks(self, tasks, slave_id):
+        """
+        Store a group of tasks for an agent. All tasks should be from the same agent
+        :param tasks:
+        :return:
+        """
+        # calico/<version>/agent/<agent_id>
         tasks_dict = {
             name: task.to_dict() for name, task in tasks.iteritems()
         }
         tasks_json = json.dumps(tasks_dict)
-        @@@ STORE BLOB FOR AGENT
+        # NOTE: don't end your path with a trailing slash :P
+        self._zk.ensure_path("/calico/agent")
+        try:
+            self._zk.create("/calico/agent/%s" % slave_id, tasks_json)
+        except NodeExistsError:
+            self._zk.set("/calico/agent/%s" % slave_id, tasks_json)
 
+
+    def get_framework_id(self):
+        url = "/calico/calico_framework_id"
+        try:
+            framework_id, stat = self._zk.get(url)
+            return framework_id
+        except NoNodeError:
+            return None
+
+    def set_framework_id(self, new_id):
+        self._zk.ensure_path("/calico/")
+        try:
+            self._zk.create("/calico/calico_framework_id")
+        except NodeExistsError:
+            # Should check if its the same framework id, but that's never possible
+            pass
 
 class Agent(object):
     def __init__(self, scheduler, agent_id):
@@ -122,7 +157,7 @@ class Agent(object):
         """
 
     def __repr__(self):
-        return "Agent(%s)" % self.id
+        return "Agent(%s)" % self.agent_id
 
     def handle_offer(self, driver, offer):
         """
@@ -266,7 +301,7 @@ class Agent(object):
         # Query the state of each task that was previously running.  Terminated
         # tasks do not need to be queried because their state won't have
         # changed, and the task may have been tidied up.
-        self.tasks = self.scheduler.zk.load_tasks()
+        self.tasks = self.scheduler.zk.load_tasks(self.agent_id)
         task_statuses = [task.get_task_status(self)
                          for task in self.tasks.itervalues() if task.running()]
         if not task_statuses:
@@ -283,11 +318,12 @@ class Agent(object):
         :return: The new task.
         """
         task = task_class(*args, **kwargs)
+        task.slave_id = self.agent_id
         self.tasks[task.name] = task
 
         # Persist these tasks to the datastore.
         if self.scheduler.zk:
-            self.scheduler.zk.store_tasks(self.tasks)
+            self.scheduler.zk.store_tasks(self.tasks, task.slave_id)
 
         return task
 
@@ -351,11 +387,12 @@ class Agent(object):
         """
         # Extract the task name from the update and update the appropriate
         # task.  Updates for the restart task need special case processing
-        name = Task.name_from_task_id(update.task_id)
+        name = Task.name_from_task_id(update.task_id.value)
 
         # Lookup the existing task, if there is one.
+
         task = self.tasks.get(name)
-        if not task or task.task_id != update.task_id:
+        if not task or task.task_id != update.task_id.value:
             _log.debug("Task is not recognised - ignoring")
             return
 
@@ -412,6 +449,7 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         Callback used when the framework is successfully registered.
         """
         _log.info("REGISTERED: with framework ID %s", frameworkId.value)
+        self.zk.set_framework_id(frameworkId.value)
 
     def reregistered(self, driver, frameworkId, masterInfo):
         """
@@ -448,7 +486,7 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         Executor
         """
         # Pass the update to the appropriate Agent.
-        agent = self.get_agent(update.slave_id)
+        agent = self.get_agent(update.slave_id.value)
         agent.handle_update(driver, update)
 
     def slaveLost(self, driver, slave_id):
@@ -481,9 +519,17 @@ if __name__ == "__main__":
     framework.principal = "calico-installation-framework"
     framework.failover_timeout = 604800
 
-    zk = ZkDatastore(@@@uri)
+    zk_persist_url = os.getenv('ZK_PERSIST')
+    print "Using zk: ", zk_persist_url
+    zk = ZkDatastore(zk_persist_url)
+
+    framework_id = zk.get_framework_id()
+    if framework_id:
+        framework.id.value = framework_id
+
     scheduler = CalicoInstallerScheduler(
         max_concurrent_restarts=max_concurrent_restarts, zk=zk)
+
 
     _log.info("Launching")
     driver = mesos.native.MesosSchedulerDriver(scheduler,

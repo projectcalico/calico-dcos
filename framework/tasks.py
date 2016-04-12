@@ -8,6 +8,7 @@ class Task(object):
         self.state = state
         self.executor_id = None
         self.healthy = True
+        self.slave_id = None
 
         # Create a task ID if not supplied.
         self.task_id = task_id or "%s-%s-%s" % (self.name,
@@ -134,11 +135,11 @@ class TaskRunEtcdProxy(Task):
     -  Starts an etcd proxy listening on port 2379.
     -  Performs regular health checks
     """
-    name = "calico-install-etcd-proxy"
+    name = "calico_install_etcd_proxy"
     persistent = True
 
     def cmd(self):
-        return "ip addr && sleep 300"
+        return "ip addr && sleep 30"
 
 class TaskInstallNetmodules(Task):
     """
@@ -167,7 +168,7 @@ class TaskInstallNetmodules(Task):
              timestamp of the agent start time.
           -  Return restart-agent-yes
     """
-    name = "calico-install-netmodules"
+    name = "calico_install_netmodules"
     persistent = False
 
     def restart_required(self):
@@ -206,7 +207,7 @@ class TaskInstallDockerClusterStore(Task):
              timestamp of the docker daemon start time.
           -  Return restart-docker-yes
     """
-    name = "calico-configure-docker"
+    name = "calico_configure_docker"
     persistent = False
 
     def restart_required(self):
@@ -234,7 +235,7 @@ class TaskRestartComponents(Task):
     If the InstallNetmodules task indicated that a restart is required then
     kill the agent process.
     """
-    name = "calico-restart-agent"
+    name = "calico_restart_agent"
     persistent = False
 
     def __init__(self, agent, task_id=None, state=mesos_pb2.TASK_STAGING,
@@ -253,11 +254,11 @@ class TaskRunCalicoNode(Task):
     Task to run Calico node.  This is a long-running task, if the task fails
     it will be restarted.
     """
-    name = "calico-node"
+    name = "calico_node"
     persistent = True
 
     def cmd(self):
-        return "ip addr && sleep 300"
+        return "ip addr && sleep 30"
 
 
 class TaskRunCalicoLibnetwork(Task):
@@ -265,9 +266,9 @@ class TaskRunCalicoLibnetwork(Task):
     Task to run an Calico libnetwork.  This is a long-running task, if the task
     fails it will be restarted.
     """
-    name = "calico-libnetwork"
+    name = "calico_libnetwork"
     persistent = True
 
     def cmd(self):
-        return "ip addr && sleep 300"
+        return "ip addr && sleep 30"
 
