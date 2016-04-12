@@ -1,17 +1,26 @@
-from mesos.interface import mesos_pb2
 import uuid
-from constants import VERSION, TASK_CPUS, TASK_MEM
+
+from mesos.interface import mesos_pb2
+
+from calico_dcos.common.utils import setup_logging
+
+from calico_dcos.common.constants import (VERSION, LOGFILE_FRAMEWORK,
+    ACTION_RUN_ETCD_PROXY, ACTION_INSTALL_NETMODULES, ACTION_CONFIGURE_DOCKER,
+    ACTION_RESTART, ACTION_CALICO_NODE, ACTION_CALICO_LIBNETWORK,
+    TASK_MEM, TASK_CPUS, RESTART_COMPONENTS)
+
+_log = setup_logging(LOGFILE_FRAMEWORK)
 
 
 class Task(object):
-    def __init__(self, task_id=None, state=mesos_pb2.TASK_STAGING):
+    def __init__(self, task_id=None, state=mesos_pb2.TASK_STAGING, stdout=""):
         self.state = state
         self.executor_id = None
         self.healthy = True
-        self.slave_id = None
+        self.stdout = RESTART_COMPONENTS
 
         # Create a task ID if not supplied.
-        self.task_id = task_id or "%s-%s-%s" % (self.name,
+        self.task_id = task_id or "%s-%s-%s" % (self.action,
                                                 VERSION,
                                                 uuid.uuid4())
 
@@ -30,7 +39,7 @@ class Task(object):
     def cmd(self):
         raise NotImplementedError()
 
-    def as_new_mesos_task(self):
+    def as_new_mesos_task(self, agent_id):
         """
         Take the information stored in this Task object and fill a
         mesos task.
@@ -38,7 +47,7 @@ class Task(object):
         task = mesos_pb2.TaskInfo()
         task.name = repr(self)
         task.task_id.value = self.task_id
-        task.slave_id.value = self.slave_id
+        task.slave_id.value = agent_id
 
         cpus = task.resources.add()
         cpus.name = "cpus"
@@ -70,8 +79,12 @@ class Task(object):
                               mesos_pb2.TASK_RUNNING)
 
     def update(self, update):
+        _log.info("Updating status of %s from %d to %d",
+                  self, self.state, update.state)
         self.state = update.state
         self.clean = True
+        #TODO
+        #self.stdout = xxxx
 
     def get_task_status(self, agent):
         """
@@ -84,10 +97,32 @@ class Task(object):
         task_status.state = self.state
         return task_status
 
+    def restart_options(self):
+        """
+        Return the set of restart options parsed from the command output.
+        :return:
+        """
+        # We should only be checking if the task actually finished, and if the
+        # task returns a list of components to restart.
+        assert self.finished()
+
+        components = None
+        for line in self.stdout.split("\n"):
+            if line.startswith(RESTART_COMPONENTS):
+                value = line[len(RESTART_COMPONENTS):]
+                components = {c.strip() for c in value.split(",")}
+                break
+        if components is None:
+            _log.error("Attempting to find restart components from task that "
+                       "does not require restarts.")
+            raise AssertionError("Not expecting restart components")
+        return components
+
     def to_dict(self):
         task_dict = {
             "task_id": self.task_id,
-            "state": self.state
+            "state": self.state,
+            "stdout": self.stdout
         }
         return task_dict
 
@@ -117,13 +152,13 @@ class Task(object):
 
     @classmethod
     def version_from_task_id(cls, task_id):
-        _name, version, _uuid = task_id.split("-", 2)
+        _action, version, _uuid = task_id.split("-", 2)
         return version
 
     @classmethod
-    def name_from_task_id(cls, task_id):
-        name, _version, _uuid = task_id.split("-", 2)
-        return name
+    def action_from_task_id(cls, task_id):
+        action, _version, _uuid = task_id.split("-", 2)
+        return action
 
 
 class TaskRunEtcdProxy(Task):
@@ -135,11 +170,12 @@ class TaskRunEtcdProxy(Task):
     -  Starts an etcd proxy listening on port 2379.
     -  Performs regular health checks
     """
-    name = "calico_install_etcd_proxy"
+    action = ACTION_RUN_ETCD_PROXY
     persistent = True
 
     def cmd(self):
         return "ip addr && sleep 30"
+
 
 class TaskInstallNetmodules(Task):
     """
@@ -168,16 +204,8 @@ class TaskInstallNetmodules(Task):
              timestamp of the agent start time.
           -  Return restart-agent-yes
     """
-    name = "calico_install_netmodules"
+    action = ACTION_INSTALL_NETMODULES
     persistent = False
-
-    def restart_required(self):
-        """
-        Whether a restart is required to pick up the netmodules install.
-        :return:
-        """
-        #TODO
-        return False
 
     def cmd(self):
         return "ip addr"
@@ -207,16 +235,8 @@ class TaskInstallDockerClusterStore(Task):
              timestamp of the docker daemon start time.
           -  Return restart-docker-yes
     """
-    name = "calico_configure_docker"
+    action = ACTION_CONFIGURE_DOCKER
     persistent = False
-
-    def restart_required(self):
-        """
-        Whether a restart is required to pick up the new Docker configuration.
-        :return:
-        """
-        #TODO
-        return False
 
     def cmd(self):
         return "ip addr"
@@ -228,25 +248,21 @@ class TaskRestartComponents(Task):
     -  Docker daemon
     -  Mesos Agent process
     This is a short lived task.
-
-    If the InstallDockerClusterStore task indicated that a restart is required
-    then kill the Docker daemon and wait for it to restart.
-
-    If the InstallNetmodules task indicated that a restart is required then
-    kill the agent process.
     """
-    name = "calico_restart_agent"
+    action = ACTION_RESTART
     persistent = False
 
-    def __init__(self, agent, task_id=None, state=mesos_pb2.TASK_STAGING,
-                 restart_agent=False, restart_docker=False):
-        self.restart_agent = restart_agent
-        self.restart_docker = restart_docker
-        super(self, TaskRestartComponents).__init__(agent, task_id=task_id,
-                                                    state=state)
+    def __init__(self, task_id=None, state=mesos_pb2.TASK_STAGING,
+                 stdout="", restart_options=None):
+        self.restart_options = restart_options or set()
+        super(self, TaskRestartComponents).__init__(task_id=task_id,
+                                                    state=state,
+                                                    stdout=stdout)
 
     def cmd(self):
-        return "ip addr"
+        assert self.restart_options, "Restart task should not be invoked if " \
+                                     "no restarts are required"
+        return "ip addr && echo " + " ".join(self.restart_options)
 
 
 class TaskRunCalicoNode(Task):
@@ -254,7 +270,7 @@ class TaskRunCalicoNode(Task):
     Task to run Calico node.  This is a long-running task, if the task fails
     it will be restarted.
     """
-    name = "calico_node"
+    action = ACTION_CALICO_NODE
     persistent = True
 
     def cmd(self):
@@ -266,7 +282,7 @@ class TaskRunCalicoLibnetwork(Task):
     Task to run an Calico libnetwork.  This is a long-running task, if the task
     fails it will be restarted.
     """
-    name = "calico_libnetwork"
+    action = ACTION_CALICO_LIBNETWORK
     persistent = True
 
     def cmd(self):

@@ -28,27 +28,23 @@ Description:
 """
 import json
 import os
+
 import mesos.interface
-from mesos.interface import mesos_pb2
 import mesos.native
+from mesos.interface import mesos_pb2
 from kazoo.client import KazooClient, NoNodeError, NodeExistsError
-from docopt import docopt
-from calico_utils import _setup_logging
+
 from tasks import (Task, TaskRunEtcdProxy, TaskInstallDockerClusterStore,
                    TaskInstallNetmodules, TaskRestartComponents,
                    TaskRunCalicoNode, TaskRunCalicoLibnetwork)
-from constants import LOGFILE
+from calico_dcos.common.utils import setup_logging
+from calico_dcos.common.constants import LOGFILE_FRAMEWORK, VERSION
 
-_log = _setup_logging(LOGFILE)
+_log = setup_logging(LOGFILE_FRAMEWORK)
 
 # TODO
 # o  Need to check CPU/Mem for each calico task
-# o  How do we get a list of tasks that are already running for a particular framework
-#    when a framework is restarted.
-# o  Need to handle versioning
 # o  Check that a task can reboot the agent (quick test to make sure this will fly)
-# o  Can we start a task with the same task ID of a task that is running, or failed, or completed etc?
-#    or do we need to delete a task with the same ID first.
 # o  What happens if a framework is killed
 # o  Can we determine what slave the framework is running on?  That would help limit the issues
 #    caused by restart - worst case scenario is we keep restarting the node that runs the framework...
@@ -56,8 +52,6 @@ _log = _setup_logging(LOGFILE)
 #    matter, but it would slow things down.
 # o  Framework could ultimately have a web UI - so launch with a known DNS entry so you can point
 #    a browser to determine current calico status.  Tasks could perform periodic checks on calico
-# o  Handle loss of framework
-# o  Need to use zk as backend store because using fixed task names is not viable
 # o  Suppress offers when calico services are running
 # o  Revive offers when calico services are not running
 
@@ -66,66 +60,51 @@ _log = _setup_logging(LOGFILE)
 # -  Etcd SRV address
 # -  Etcd proxy port (maybe)
 
-
 TASK_CLASSES = [TaskRunEtcdProxy, TaskInstallNetmodules,
                 TaskInstallDockerClusterStore, TaskRestartComponents,
                 TaskRunCalicoNode, TaskRunCalicoLibnetwork]
-TASK_CLASSES_BY_NAME = {cls.name: cls for cls in TASK_CLASSES}
+TASK_CLASSES_BY_ACTION = {cls.action: cls for cls in TASK_CLASSES}
 
+# The ZooKeeper Calico agent directory
+ZK_AGENT_DIR = "/calico-framework/agent"
 
 class ZkDatastore(object):
-    def __init__(self, uri):
-        self.uri = uri
+    def __init__(self, url):
+        self.url = url
         self.zk_prefix = "calico"
-        self._zk = KazooClient(hosts=uri)
+        self._zk = KazooClient(hosts=url)
         self._zk.start()
+        self._zk.ensure_path(ZK_AGENT_DIR)
 
     def load_tasks(self, agent_id):
         try:
-            tasks_str, stat = self._zk.get("/calico/agent/%s" % agent_id)
+            tasks_str, _stat = self._zk.get("%s/%s" % (ZK_AGENT_DIR, agent_id))
         except NoNodeError:
-            tasks_str = "{}"
-        tasks_dict = json.loads(tasks_str)
+            tasks_dict = {}
+        else:
+            tasks_dict = json.loads(tasks_str)
+
         tasks = {
-            name: TASK_CLASSES_BY_NAME[name].from_dict(task_dict)
-            for name, task_dict in tasks_dict.iteritems()
+            action: TASK_CLASSES_BY_ACTION[action].from_dict(task_dict)
+            for action, task_dict in tasks_dict.iteritems()
         }
         return tasks
 
-    def store_tasks(self, tasks, slave_id):
+    def store_tasks(self, agent_id, tasks):
         """
-        Store a group of tasks for an agent. All tasks should be from the same agent
+        Store a group of tasks for an agent.
         :param tasks:
         :return:
         """
-        # calico/<version>/agent/<agent_id>
         tasks_dict = {
-            name: task.to_dict() for name, task in tasks.iteritems()
+            action: task.to_dict() for action, task in tasks.iteritems()
         }
         tasks_json = json.dumps(tasks_dict)
-        # NOTE: don't end your path with a trailing slash :P
-        self._zk.ensure_path("/calico/agent")
         try:
-            self._zk.create("/calico/agent/%s" % slave_id, tasks_json)
+            self._zk.create("%s/%s" % (ZK_AGENT_DIR, agent_id), tasks_json)
         except NodeExistsError:
-            self._zk.set("/calico/agent/%s" % slave_id, tasks_json)
+            self._zk.set("%s/%s" % (ZK_AGENT_DIR, agent_id), tasks_json)
 
-
-    def get_framework_id(self):
-        url = "/calico/calico_framework_id"
-        try:
-            framework_id, stat = self._zk.get(url)
-            return framework_id
-        except NoNodeError:
-            return None
-
-    def set_framework_id(self, new_id):
-        self._zk.ensure_path("/calico/")
-        try:
-            self._zk.create("/calico/calico_framework_id")
-        except NodeExistsError:
-            # Should check if its the same framework id, but that's never possible
-            pass
 
 class Agent(object):
     def __init__(self, scheduler, agent_id):
@@ -139,9 +118,12 @@ class Agent(object):
         The agent ID.
         """
 
-        self.agent_syncd = False
+        self.agent_syncd = None
         """
-        Whether this agent has sync'd with the Master.
+        Whether this agent has sync'd with the Master.  This is a tri-state
+        field (None, False, True).  None indicates a sync has not been
+        initiated, False indicates it has started but not completed, True
+        indicates complete.
         """
 
         self.tasks = {}
@@ -158,6 +140,14 @@ class Agent(object):
 
     def __repr__(self):
         return "Agent(%s)" % self.agent_id
+
+    def _task(self, cls):
+        """
+        Return the task associated with a Task class.
+        :param cls:
+        :return: The Task, or None if the task has not been scheduled.
+        """
+        return self.tasks.get(cls.action)
 
     def handle_offer(self, driver, offer):
         """
@@ -208,15 +198,18 @@ class Agent(object):
         the tasks ensure that we do not restart again - so we will not end up
         in a restart loop.
         """
-        if not self.agent_syncd:
-            # The agent is not yet sync'd.  If status updates have not been
-            # triggered then trigger them now.
+        _log.debug("Handling offer")
+
+        if self.agent_syncd is None:
+            # A resync has not been initiated.  Trigger a resync.
+            _log.debug("Agent is not yet sync'd - trigger a resync")
             self.trigger_resync(driver)
 
-            # If there is nothing to resync, the agent_syncd flag may be set,
-            # so check it again to decide whether we have to wait.
-            if not self.agent_syncd:
-                return None
+        # If there is nothing to resync, the agent_syncd flag may be set,
+        # so check it again to decide whether we have to wait.
+        if not self.agent_syncd:
+            _log.debug("Agent has not yet sync'd")
+            return None
 
         if self.task_can_be_offered(TaskRunEtcdProxy, offer):
             # We have no etcd task running - start one now.
@@ -229,7 +222,7 @@ class Agent(object):
             _log.info("Install or check netmodules")
             return self.new_task(TaskInstallNetmodules)
 
-        if self.task_running(TaskRunEtcdProxy):
+        if not self.task_running(TaskRunEtcdProxy):
             # We need to wait for the proxy to come online before continuing.
             _log.info("Waiting for etcd proxy to be healthy")
             return None
@@ -256,20 +249,18 @@ class Agent(object):
         # -  If a restart is required, kick off the restart task.
         # -  Otherwise, make sure our restarting flag is reset, and continue
         #    with the rest of the installation.
-        restart_agent = self.tasks[TaskInstallNetmodules].restart_required()
-        restart_docker = self.tasks[TaskInstallDockerClusterStore].restart_required()
-        restart_required = restart_agent or restart_docker
-        self.restarting = self.restarting and restart_required
+        restart_options = self._task(TaskInstallNetmodules).restart_options() | \
+                          self._task(TaskInstallDockerClusterStore).restart_options()
+        self.restarting = self.restarting and restart_options
 
-        if restart_required and self.task_can_be_offered(TaskRestartComponents, offer):
+        if restart_options and self.task_can_be_offered(TaskRestartComponents, offer):
             # We require a restart and we haven't already scheduled one.
             _log.info("Schedule a restart task")
             return self.new_task(TaskRestartComponents,
-                                 restart_agent=restart_agent,
-                                 restart_docker=restart_docker)
+                                 restart_options=restart_options)
 
         # At this point we only continue when a restart is no longer required.
-        if restart_required:
+        if restart_options:
             # Still require a restart to complete (or fail).
             _log.info("Waiting for restart to be scheduled or to complete")
             return None
@@ -308,7 +299,10 @@ class Agent(object):
             _log.info("No running tasks, assume sync'd")
             self.agent_syncd = True
             return
+
+        # Start the resync and indicate that it is not yet complete.
         driver.reconcileTasks(task_statuses)
+        self.agent_syncd = False
 
     def new_task(self, task_class, *args, **kwargs):
         """
@@ -318,12 +312,11 @@ class Agent(object):
         :return: The new task.
         """
         task = task_class(*args, **kwargs)
-        task.slave_id = self.agent_id
-        self.tasks[task.name] = task
+        self.tasks[task.action] = task
 
         # Persist these tasks to the datastore.
         if self.scheduler.zk:
-            self.scheduler.zk.store_tasks(self.tasks, task.slave_id)
+            self.scheduler.zk.store_tasks(self.agent_id, self.tasks)
 
         return task
 
@@ -349,7 +342,7 @@ class Agent(object):
         :param task_class:
         :return: True if the task needs scheduling.  False otherwise.
         """
-        task = self.tasks.get(task_class.name)
+        task = self._task(task_class)
         if not task:
             return True
         if task.persistent:
@@ -363,7 +356,7 @@ class Agent(object):
         :param task_class:
         :return:
         """
-        task = self.tasks.get(task_class.name)
+        task = self._task(task_class)
         if not task:
             return False
         return task.running()
@@ -374,7 +367,7 @@ class Agent(object):
         :param task_class:
         :return:
         """
-        task = self.tasks.get(task_class.name)
+        task = self._task(task_class)
         if not task:
             return False
         return task.finished()
@@ -385,13 +378,12 @@ class Agent(object):
         completed the sync.
         :param update:
         """
-        # Extract the task name from the update and update the appropriate
+        # Extract the task action from the update and update the appropriate
         # task.  Updates for the restart task need special case processing
-        name = Task.name_from_task_id(update.task_id.value)
+        action = Task.action_from_task_id(update.task_id.value)
 
         # Lookup the existing task, if there is one.
-
-        task = self.tasks.get(name)
+        task = self.tasks.get(action)
         if not task or task.task_id != update.task_id.value:
             _log.debug("Task is not recognised - ignoring")
             return
@@ -402,10 +394,14 @@ class Agent(object):
         # An update to indicate a restart task is no longer running requires
         # some additional processing to re-spawn the install tasks as this
         # ensures the installation completed successfully.
-        if (name == TaskRestartComponents.name) and not task.running():
+        if (action == TaskRestartComponents.action) and not task.running():
             _log.debug("Handle update for restart task")
-            del(self.tasks[TaskInstallNetmodules.name])
+            del(self.tasks[TaskInstallNetmodules.action])
             del(self.tasks[TaskInstallDockerClusterStore])
+
+        # Persist the updated tasks to the datastore.
+        if self.scheduler.zk:
+            self.scheduler.zk.store_tasks(self.agent_id, self.tasks)
 
         # If we were resyncing then check if all of our tasks are now syncd.
         if not self.agent_syncd and all(task.clean for task in self.tasks.values()):
@@ -475,8 +471,9 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
                 continue
 
             _log.info("Launching Task %s", task)
+            mesos_task = task.as_new_mesos_task(offer.slave_id.value)
             operation = mesos_pb2.Offer.Operation()
-            operation.launch.task_infos.extend([task.as_new_mesos_task()])
+            operation.launch.task_infos.extend([mesos_task])
             operation.type = mesos_pb2.Offer.Operation.LAUNCH
             driver.acceptOffers([offer.id], [operation])
 
@@ -497,7 +494,7 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         :param slave_id:
         """
         agent = self.get_agent(slave_id)
-        agent.agent_syncd = False
+        agent.agent_syncd = None
 
     def offerRescinded(self, driver, offer_id):
         # Not obvious if this is actually required.  We probably need to track
@@ -508,30 +505,25 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
 if __name__ == "__main__":
     # Extract relevant configuration from our environment
     master_ip = os.getenv('MESOS_MASTER', 'mesos.master')
-    zk = os.getenv('ZK', None)
     max_concurrent_restarts = os.getenv('MAX_CONCURRENT_RESTARTS', 1)
+    zk_persist_url = os.getenv('ZK_PERSIST')
+    etcd_service = os.getenv('ETCD_SERVICE_ADDR')
 
-    print "Connecting to Master: ", master_ip
-
+    _log.info("Connecting to Master: %s", master_ip)
     framework = mesos_pb2.FrameworkInfo()
     framework.user = ""  # Have Mesos fill in the current user.
-    framework.name = "Calico installation framework"
-    framework.principal = "calico-installation-framework"
+    framework.name = "Calico framework"
+    framework.principal = "calico-framework"
+    framework.id.value = "calico-framework"
     framework.failover_timeout = 604800
 
-    zk_persist_url = os.getenv('ZK_PERSIST')
-    print "Using zk: ", zk_persist_url
+    _log.info("Using zk: %s", zk_persist_url)
     zk = ZkDatastore(zk_persist_url)
-
-    framework_id = zk.get_framework_id()
-    if framework_id:
-        framework.id.value = framework_id
 
     scheduler = CalicoInstallerScheduler(
         max_concurrent_restarts=max_concurrent_restarts, zk=zk)
 
-
-    _log.info("Launching")
+    _log.info("Launching Calico Mesos scheduler")
     driver = mesos.native.MesosSchedulerDriver(scheduler,
                                                framework,
                                                master_ip)

@@ -2,10 +2,8 @@ import os
 import logging
 import logging.handlers
 import errno
-import re
 
-
-def _setup_logging(logfile):
+def setup_logging(logfile):
     _log = logging.getLogger("CALICO_FRAMEWORK")
 
     # Ensure directory exists.
