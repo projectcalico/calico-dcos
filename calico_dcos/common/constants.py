@@ -6,9 +6,6 @@ TASK_MEM = 128.0
 LOGFILE_INSTALLER = './calico_installer.log'
 LOGFILE_FRAMEWORK = '/var/log/calico/calico_framework.log'
 
-# Version of the installer framework
-VERSION = "1.0.0"
-
 # Installation script actions
 ACTION_RUN_ETCD_PROXY = "calico_install_etcd_proxy"
 ACTION_INSTALL_NETMODULES = "calico_install_netmodules"

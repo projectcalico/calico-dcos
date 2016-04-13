@@ -1,3 +1,4 @@
+from datetime import datetime
 import uuid
 
 from mesos.interface import mesos_pb2
@@ -13,17 +14,29 @@ _log = setup_logging(LOGFILE_FRAMEWORK)
 
 
 class Task(object):
-    def __init__(self, task_id=None, state=mesos_pb2.TASK_STAGING, stdout=""):
-        self.state = state
-        self.executor_id = None
-        self.healthy = True
-        self.stdout = RESTART_COMPONENTS
+    action = None
+    version = None
+
+    def __init__(self, **kwargs):
+        self.state = kwargs.get("state") or mesos_pb2.TASK_STAGING
+        self.created = kwargs.get("created") or str(datetime.utcnow())
+        self.updated = kwargs.get("updated") or "NA"
+        self.stdout = kwargs.get("stdout") or RESTART_COMPONENTS   #TODO Fix
 
         # Create a task ID if not supplied.
-        self.task_id = task_id or "%s-%s-%s" % (self.action,
-                                                VERSION,
-                                                uuid.uuid4())
+        assert self.action is not None, "Action has not been overridden by " \
+                                        "subclass"
+        self.task_id = kwargs.get("task_id") or "%s-%s" % (self.action,
+                                                           uuid.uuid4())
 
+        # Update the version from the one supplied, otherwise default to the
+        # current task version.  If None, then the subclass has not overridden
+        # the value.
+        self.version = kwargs.get("version") or self.version
+        assert self.version is not None, "Version has not been overridden " \
+                                         "by subclass"
+
+        self.healthy = True
         self.clean = True
         """
         Tasks loaded from the persistent store are not considered clean until
@@ -88,6 +101,7 @@ class Task(object):
     def update(self, update):
         _log.info("Updating status of %s from %d to %d",
                   self, self.state, update.state)
+        self.time_updated = str(datetime.utcnow())
         self.state = update.state
         self.clean = True
         #TODO
@@ -129,20 +143,21 @@ class Task(object):
         task_dict = {
             "task_id": self.task_id,
             "state": self.state,
-            "stdout": self.stdout
+            "stdout": self.stdout,
+            "created": self.created,
+            "updated": self.updated,
+            "version": self.version
         }
         return task_dict
 
     @classmethod
     def from_dict(cls, task_dict):
-        task = cls(task_id=task_dict["task_id"],
-                   state=task_dict["state"])
-
         # Tasks loaded from storage that were previously running are not
         # considered to be clean.  These tasks should be queried, and the
         # state updated from the query result.  If a task was not
         # previously running then it can be considered clean as the state
         # is terminal and cannot change.
+        task = cls(**task_dict)
         task.clean = not task.running()
         return task
 
@@ -158,13 +173,8 @@ class Task(object):
         return True
 
     @classmethod
-    def version_from_task_id(cls, task_id):
-        _action, version, _uuid = task_id.split("-", 2)
-        return version
-
-    @classmethod
     def action_from_task_id(cls, task_id):
-        action, _version, _uuid = task_id.split("-", 2)
+        action, _uuid = task_id.split("-", 1)
         return action
 
 
@@ -178,6 +188,8 @@ class TaskRunEtcdProxy(Task):
     -  Performs regular health checks
     """
     action = ACTION_RUN_ETCD_PROXY
+    version = 0  # Increment if the run task needs to be re-executed in new
+                 # release
     persistent = True
 
     def cmd(self):
@@ -212,6 +224,8 @@ class TaskInstallNetmodules(Task):
           -  Return restart-agent-yes
     """
     action = ACTION_INSTALL_NETMODULES
+    version = 0  # Increment if the run task needs to be re-executed in new
+                 # release
     persistent = False
 
     def cmd(self):
@@ -243,6 +257,8 @@ class TaskInstallDockerClusterStore(Task):
           -  Return restart-docker-yes
     """
     action = ACTION_CONFIGURE_DOCKER
+    version = 0  # Increment if the run task needs to be re-executed in new
+                 # release
     persistent = False
 
     def cmd(self):
@@ -257,14 +273,18 @@ class TaskRestartComponents(Task):
     This is a short lived task.
     """
     action = ACTION_RESTART
+    version = 0  # Increment if the run task needs to be re-executed in new
+                 # release
     persistent = False
 
-    def __init__(self, task_id=None, state=mesos_pb2.TASK_STAGING,
-                 stdout="", restart_options=None):
-        self.restart_options = restart_options or set()
-        super(TaskRestartComponents, self).__init__(task_id=task_id,
-                                                    state=state,
-                                                    stdout=stdout)
+    def __init__(self, **kwargs):
+        self.restart_options = kwargs.get("restart_options") or set()
+        super(TaskRestartComponents, self).__init__(**kwargs)
+
+    def to_dict(self):
+        task_dict = super(TaskRestartComponents, self).to_dict()
+        task_dict["restart_options"] = self.restart_options
+        return task_dict
 
     def cmd(self):
         assert self.restart_options, "Restart task should not be invoked if " \
@@ -278,6 +298,8 @@ class TaskRunCalicoNode(Task):
     it will be restarted.
     """
     action = ACTION_CALICO_NODE
+    version = 0  # Increment if the run task needs to be re-executed in new
+                 # release
     persistent = True
 
     def cmd(self):
@@ -290,6 +312,8 @@ class TaskRunCalicoLibnetwork(Task):
     fails it will be restarted.
     """
     action = ACTION_CALICO_LIBNETWORK
+    version = 0  # Increment if the run task needs to be re-executed in new
+                 # release
     persistent = True
 
     def cmd(self):
