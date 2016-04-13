@@ -71,7 +71,7 @@ ZK_AGENT_DIR = "/calico-framework/agent"
 class ZkDatastore(object):
     def __init__(self, url):
         self.url = url
-        self.zk_prefix = "calico"
+        self.zk_prefix = "root"
         self._zk = KazooClient(hosts=url)
         self._zk.start()
         self._zk.ensure_path(ZK_AGENT_DIR)
@@ -260,7 +260,7 @@ class Agent(object):
                                  restart_options=restart_options)
 
         # At this point we only continue when a restart is no longer required.
-        if restart_options:
+        if self.restarting:
             # Still require a restart to complete (or fail).
             _log.info("Waiting for restart to be scheduled or to complete")
             return None

@@ -4,14 +4,15 @@ import re
 import shutil
 import sys
 import time
+import socket
 
 import psutil
 
 from calico_dcos.common.constants import (LOGFILE_INSTALLER,
-    ACTION_RUN_ETCD_PROXY, ACTION_INSTALL_NETMODULES, ACTION_CONFIGURE_DOCKER,
-    ACTION_RESTART, ACTION_CALICO_NODE, ACTION_CALICO_LIBNETWORK,
-    RESTART_DOCKER, RESTART_AGENT, RESTART_COMPONENTS,
-    MAX_TIME_FOR_DOCKER_RESTART)
+    ACTION_INSTALL_NETMODULES, ACTION_CONFIGURE_DOCKER, ACTION_RESTART,
+    ACTION_CALICO_NODE, RESTART_DOCKER, RESTART_COMPONENTS,
+    MAX_TIME_FOR_DOCKER_RESTART, ACTION_GET_AGENT_IP,
+    MESOS_MASTER_HOSTNAME, MESOS_MASTER_PORT)
 from calico_dcos.common.version import VERSION
 from calico_dcos.common.utils import setup_logging
 
@@ -51,8 +52,13 @@ def find_process(executable, cmdline_re):
     :param cmdline_re:
     :return:
     """
-    processes = [p for p in psutil.process_iter()
-                   if p.exe() == executable and cmdline_re.match(p.cmdline())]
+    processes = []
+    for p in psutil.process_iter():
+        _log.debug("%s == %s ?", p.exe(), executable)
+        if p.exe() == executable:
+            _log.debug("regex match: %s", p.cmdline())
+            if 'daemon' in p.cmdline():
+                processes.append(p)
 
     if not processes:
         print "Process not found for %s" % executable
@@ -98,7 +104,7 @@ def load_config(filename):
     if not os.path.exists(filename):
         return {}
     with open(filename) as f:
-        return json.loads(f.readall())
+        return json.loads(f.read())
 
 
 def store_config(filename, config):
@@ -137,13 +143,6 @@ def output_restart_components(components):
     """
     print RESTART_COMPONENTS + ",".join(components or [])
 
-def cmd_run_etcd_proxy():
-    """
-    Run etcd proxy listening on port 2379 and block.
-    :return:
-    """
-    return None
-
 
 def cmd_install_netmodules():
     """
@@ -173,6 +172,47 @@ def cmd_install_netmodules():
           -  Return restart-agent-yes
 
     :return:
+    """
+    # Task URIS will have downloaded libmesos_network_isolator.so & calico_mesos to ./
+    # Move ./libmesos_network_isolator.so => /opt/mesosphere/lib/mesos/libmesos_network_isolator.so
+    # Move ./calico_mesos => /calico/calico_mesos
+    # Change the line in /opt/mesosphere/etc/mesos-slave-common that says:
+    # - MESOS_ISOLATION=cgroups/cpu,cgroups/mem,posix/disk,com_emccode_mesos_DockerVolumeDriverIsolator
+    # - to:
+    # - MESOS_ISOLATION=cgroups/cpu,cgroups/mem,posix/disk,com_emccode_mesos_DockerVolumeDriverIsolator,com_mesosphere_mesos_NetworkHook
+    #
+    # Add the following line to the end of /opt/mesosphere/etc/mesos-slave-common
+    # - MESOS_HOOKS=com_mesosphere_mesos_NetworkHook
+    #
+    # add net-modules entry to /opt/mesosphere/etc/mesos-slave-modules.json
+    # - see sample-modules.json in root of calico-dcos repo  for current modules.json
+    # - The following is what needs to be added:
+    """
+    {
+      "libraries": [
+        {
+          "file": "/opt/mesosphere/lib/libmesos_network_isolator.so",
+          "modules": [
+            {
+              "name": "com_mesosphere_mesos_NetworkIsolator",
+              "parameters": [
+                {
+                  "key": "isolator_command",
+                  "value": "/calico/calico_mesos"
+                },
+                {
+                  "key": "ipam_command",
+                  "value": "/calico/calico_mesos"
+                }
+              ]
+            },
+            {
+              "name": "com_mesosphere_mesos_NetworkHook"
+            }
+          ]
+        }
+      ]
+    }
     """
     return None
 
@@ -277,32 +317,32 @@ def cmd_restart_components():
         _log.debug("Docker daemon restarted")
     return None
 
-
-def cmd_run_calico_node():
+def cmd_get_agent_ip():
     """
-    Command to run Calico node.  This command blocks while the node is
-    running.
-
-    :return:
+    Connects a socket to the DNS entry for mesos master and returns
+    which IP address it connected via, which should be the agent's
+    accessible IP.
+    :return: string representation of agent_ip
     """
-    return None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect((MESOS_MASTER_HOSTNAME, MESOS_MASTER_PORT))
+        agent_ip =  s.getsockname()[0]
+        s.close()
+    except socket.gaierror:
+        # Return an error signal to kill the task, so the process
+        # doesn't continue on to launch calicoctl
+        _log.error("Unable to connect to master at: %s:%d",
+                   MESOS_MASTER_HOSTNAME,
+                   MESOS_MASTER_PORT)
+        sys.exit(1)
 
-
-def cmd_run_calico_libnetwork():
-    """
-    Command to run an Calico libnetwork.  This command blocks while the
-    libnetwork container is running.
-
-    :return:
-    """
-    return None
+    return agent_ip
 
 
 if __name__ == "__main__":
     action = sys.argv[1]
-    if action == ACTION_RUN_ETCD_PROXY:
-        cmd_run_etcd_proxy()
-    elif action == ACTION_INSTALL_NETMODULES:
+    if action == ACTION_INSTALL_NETMODULES:
         components = cmd_install_netmodules()
         output_restart_components(components)
     elif action == ACTION_CONFIGURE_DOCKER:
@@ -312,11 +352,12 @@ if __name__ == "__main__":
         cmd_restart_components()
     elif action == ACTION_CALICO_NODE:
         cmd_run_calico_node()
-    elif action == ACTION_CALICO_LIBNETWORK:
-        cmd_run_calico_libnetwork()
+    elif action == ACTION_GET_AGENT_IP:
+        print(cmd_get_agent_ip())
     else:
         print "Unexpected action: %s" % action
         sys.exit(1)
-    print "Completed"
+    # TODO: fix logging so that this doesn't get sent to installer's stdout
+    # _log.info("Completed")
     sys.exit(0)
 

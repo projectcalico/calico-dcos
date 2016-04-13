@@ -13,7 +13,7 @@ if __name__ == "__main__":
 
     _log.info("Connecting to Master: %s", master_ip)
     framework = mesos_pb2.FrameworkInfo()
-    framework.user = "calico"  # Have Mesos fill in the current user.
+    framework.user = "root"  # Have Mesos fill in the current user.
     framework.name = "Calico framework"
     framework.principal = "calico-framework"
     framework.id.value = "calico-framework"

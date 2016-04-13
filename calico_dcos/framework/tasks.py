@@ -8,7 +8,8 @@ from calico_dcos.common.utils import setup_logging
 from calico_dcos.common.constants import (LOGFILE_FRAMEWORK,
     ACTION_RUN_ETCD_PROXY, ACTION_INSTALL_NETMODULES, ACTION_CONFIGURE_DOCKER,
     ACTION_RESTART, ACTION_CALICO_NODE, ACTION_CALICO_LIBNETWORK,
-    TASK_MEM, TASK_CPUS, RESTART_COMPONENTS)
+    TASK_MEM, TASK_CPUS, RESTART_COMPONENTS, CALICOCTL_BINARY_URL,
+    ACTION_GET_AGENT_IP, ETCD_BINARY_URL, NETMODULES_SO_URL, INSTALLER_URL)
 
 _log = setup_logging(LOGFILE_FRAMEWORK)
 
@@ -43,6 +44,9 @@ class Task(object):
         the status has been updated from a query.
         """
 
+    def as_new_mesos_task(self, agent_id):
+        raise NotImplementedError()
+
     def __repr__(self):
         return "Task(%s)" % self.task_id
 
@@ -52,7 +56,7 @@ class Task(object):
     def cmd(self):
         raise NotImplementedError()
 
-    def as_new_mesos_task(self, agent_id):
+    def new_default_task(self, agent_id):
         """
         Take the information stored in this Task object and fill a
         mesos task.
@@ -72,15 +76,8 @@ class Task(object):
         mem.type = mesos_pb2.Value.SCALAR
         mem.scalar.value = TASK_MEM
 
-        task.container.type = mesos_pb2.ContainerInfo.MESOS
         task.command.value = self.cmd()
-        task.command.user = "calico"
-
-        uri = task.command.uris.add()
-        # TODO @DanO - paramaterize this through Universe
-        uri.value = "http://172.25.20.11/installer"
-        uri.executable = True
-        uri.cache = True
+        task.command.user = "root"
 
         return task
 
@@ -193,7 +190,20 @@ class TaskRunEtcdProxy(Task):
     persistent = True
 
     def cmd(self):
-        return "./installer %s" % self.action
+        return "./etcd-v2.3.1-linux-amd64/etcd --proxy=on --discovery-srv=etcd.mesos"
+
+    def as_new_mesos_task(self, agent_id):
+        task = self.new_default_task(agent_id)
+        task.container.type = mesos_pb2.ContainerInfo.MESOS
+
+        # Download etcd binary
+        uri = task.command.uris.add()
+        uri.value = ETCD_BINARY_URL
+        uri.executable = False
+        uri.cache = True
+        uri.extract = True
+
+        return task
 
 
 class TaskInstallNetmodules(Task):
@@ -231,6 +241,17 @@ class TaskInstallNetmodules(Task):
     def cmd(self):
         return "./installer %s" % self.action
 
+    def as_new_mesos_task(self, agent_id):
+        task = self.new_default_task(agent_id)
+
+        # Download the Netmodules .so
+        uri = task.command.uris.add()
+        uri.value = NETMODULES_SO_URL
+        uri.executable = True
+        uri.cache = True
+
+        return task
+
 
 class TaskInstallDockerClusterStore(Task):
     """
@@ -264,6 +285,17 @@ class TaskInstallDockerClusterStore(Task):
     def cmd(self):
         return "./installer %s" % self.action
 
+    def as_new_mesos_task(self, agent_id):
+        task = self.new_default_task(agent_id)
+
+        # Download the installer binary
+        uri = task.command.uris.add()
+        uri.value = INSTALLER_URL
+        uri.executable = True
+        uri.cache = False
+
+        return task
+
 
 class TaskRestartComponents(Task):
     """
@@ -283,7 +315,7 @@ class TaskRestartComponents(Task):
 
     def to_dict(self):
         task_dict = super(TaskRestartComponents, self).to_dict()
-        task_dict["restart_options"] = self.restart_options
+        task_dict["restart_options"] = list(self.restart_options)
         return task_dict
 
     def cmd(self):
@@ -291,6 +323,16 @@ class TaskRestartComponents(Task):
                                      "no restarts are required"
         return "./installer %s && echo " % self.action + " ".join(self.restart_options)
 
+    def as_new_mesos_task(self, agent_id):
+        task = self.new_default_task(agent_id)
+
+        # Download the installer binary
+        uri = task.command.uris.add()
+        uri.value = INSTALLER_URL
+        uri.executable = True
+        uri.cache = False
+
+        return task
 
 class TaskRunCalicoNode(Task):
     """
@@ -303,7 +345,25 @@ class TaskRunCalicoNode(Task):
     persistent = True
 
     def cmd(self):
-        return "./installer %s " % self.action
+        return "./calicoctl node --detach=false --ip=$(./installer %s)" % ACTION_GET_AGENT_IP
+
+    def as_new_mesos_task(self, agent_id):
+        task = self.new_default_task(agent_id)
+
+        # Add a URI for downloading the calicoctl binary
+        uri = task.command.uris.add()
+        uri.value = CALICOCTL_BINARY_URL
+        uri.executable = True 
+        uri.cache = True
+        uri.extract = False
+
+        # Download the installer binary
+        uri = task.command.uris.add()
+        uri.value = INSTALLER_URL
+        uri.executable = True
+        uri.cache = True
+
+        return task
 
 
 class TaskRunCalicoLibnetwork(Task):
@@ -316,6 +376,36 @@ class TaskRunCalicoLibnetwork(Task):
                  # release
     persistent = True
 
-    def cmd(self):
-        return "./installer %s " % self.action
+    def as_new_mesos_task(self, agent_id):
+        """
+        Take the information stored in this Task object and fill a
+        mesos task.
+        """
+        task = mesos_pb2.TaskInfo()
+        task.name = repr(self)
+        task.task_id.value = self.task_id
+        task.slave_id.value = agent_id
+
+        cpus = task.resources.add()
+        cpus.name = "cpus"
+        cpus.type = mesos_pb2.Value.SCALAR
+        cpus.scalar.value = TASK_CPUS
+
+        mem = task.resources.add()
+        mem.name = "mem"
+        mem.type = mesos_pb2.Value.SCALAR
+        mem.scalar.value = TASK_MEM
+
+        task.container.type = mesos_pb2.ContainerInfo.DOCKER
+        task.container.docker.image = "calico/node-libnetwork:latest"
+        task.command.shell = False
+
+        # Volume mount in /run/docker/plugins
+        volume = task.container.volumes.add()
+        volume.mode = mesos_pb2.Volume.RW
+        volume.container_path = "/run/docker/plugins"
+        volume.host_path = "/run/docker/plugins"
+
+        return task
+
 
