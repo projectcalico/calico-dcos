@@ -5,7 +5,7 @@ from mesos.interface import mesos_pb2
 
 from calico_dcos.common.utils import setup_logging
 
-from calico_dcos.common.constants import (VERSION, LOGFILE_FRAMEWORK,
+from calico_dcos.common.constants import (LOGFILE_FRAMEWORK,
     ACTION_RUN_ETCD_PROXY, ACTION_INSTALL_NETMODULES, ACTION_CONFIGURE_DOCKER,
     ACTION_RESTART, ACTION_CALICO_NODE, ACTION_CALICO_LIBNETWORK,
     TASK_MEM, TASK_CPUS, RESTART_COMPONENTS)

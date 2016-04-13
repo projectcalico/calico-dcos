@@ -7,11 +7,12 @@ import time
 
 import psutil
 
-from calico_dcos.common.constants import (VERSION, LOGFILE_INSTALLER,
+from calico_dcos.common.constants import (LOGFILE_INSTALLER,
     ACTION_RUN_ETCD_PROXY, ACTION_INSTALL_NETMODULES, ACTION_CONFIGURE_DOCKER,
     ACTION_RESTART, ACTION_CALICO_NODE, ACTION_CALICO_LIBNETWORK,
     RESTART_DOCKER, RESTART_AGENT, RESTART_COMPONENTS,
     MAX_TIME_FOR_DOCKER_RESTART)
+from calico_dcos.common.version import VERSION
 from calico_dcos.common.utils import setup_logging
 
 _log = setup_logging(LOGFILE_INSTALLER)

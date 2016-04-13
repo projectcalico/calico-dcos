@@ -38,7 +38,7 @@ from tasks import (Task, TaskRunEtcdProxy, TaskInstallDockerClusterStore,
                    TaskInstallNetmodules, TaskRestartComponents,
                    TaskRunCalicoNode, TaskRunCalicoLibnetwork)
 from calico_dcos.common.utils import setup_logging
-from calico_dcos.common.constants import LOGFILE_FRAMEWORK, VERSION
+from calico_dcos.common.constants import LOGFILE_FRAMEWORK
 
 _log = setup_logging(LOGFILE_FRAMEWORK)
 
