@@ -1,15 +1,14 @@
-from datetime import datetime
 import uuid
-
-from mesos.interface import mesos_pb2
-
-from calico_dcos.common.utils import setup_logging
+from datetime import datetime
 
 from calico_dcos.common.constants import (LOGFILE_FRAMEWORK,
     ACTION_RUN_ETCD_PROXY, ACTION_INSTALL_NETMODULES, ACTION_CONFIGURE_DOCKER,
     ACTION_RESTART, ACTION_CALICO_NODE, ACTION_CALICO_LIBNETWORK,
     TASK_MEM, TASK_CPUS, RESTART_COMPONENTS, CALICOCTL_BINARY_URL,
     ACTION_GET_AGENT_IP, ETCD_BINARY_URL, NETMODULES_SO_URL, INSTALLER_URL)
+from mesos.interface import mesos_pb2
+
+from src.calico_dcos.common.utils import setup_logging
 
 _log = setup_logging(LOGFILE_FRAMEWORK)
 
@@ -17,6 +16,10 @@ _log = setup_logging(LOGFILE_FRAMEWORK)
 class Task(object):
     action = None
     version = None
+    description = None
+    cpu = None
+    mem = None
+
 
     def __init__(self, **kwargs):
         self.state = kwargs.get("state") or mesos_pb2.TASK_STAGING
@@ -333,6 +336,7 @@ class TaskRestartComponents(Task):
         uri.cache = False
 
         return task
+
 
 class TaskRunCalicoNode(Task):
     """

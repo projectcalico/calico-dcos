@@ -31,5 +31,3 @@ RESTART_COMPONENTS = "Restart components: "
 RESTART_DOCKER = "restart-docker"
 RESTART_AGENT = "restart-agent"
 
-# Max time for process restarts (in seconds)
-MAX_TIME_FOR_DOCKER_RESTART = 30

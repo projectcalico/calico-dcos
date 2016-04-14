@@ -27,18 +27,17 @@ Description:
   Mesos framework used to install Calico in a Mesos cluster..
 """
 import json
-import os
 
 import mesos.interface
 import mesos.native
-from mesos.interface import mesos_pb2
+from calico_dcos.common.constants import LOGFILE_FRAMEWORK
 from kazoo.client import KazooClient, NoNodeError, NodeExistsError
+from mesos.interface import mesos_pb2
 
+from src.calico_dcos.common.utils import setup_logging
 from tasks import (Task, TaskRunEtcdProxy, TaskInstallDockerClusterStore,
                    TaskInstallNetmodules, TaskRestartComponents,
                    TaskRunCalicoNode, TaskRunCalicoLibnetwork)
-from calico_dcos.common.utils import setup_logging
-from calico_dcos.common.constants import LOGFILE_FRAMEWORK
 
 _log = setup_logging(LOGFILE_FRAMEWORK)
 
@@ -130,12 +129,6 @@ class Agent(object):
         """
         Tasks for each task type (we only ever have one of each running on an
         agent.
-        """
-
-        self.restarting = False
-        """
-        Whether this agent has initiated a restart sequence.  Once set, this
-        is reset when a restart is no longer required.
         """
 
     def __repr__(self):
@@ -247,23 +240,16 @@ class Agent(object):
 
         # Determine if a restart is required.
         # -  If a restart is required, kick off the restart task.
-        # -  Otherwise, make sure our restarting flag is reset, and continue
-        #    with the rest of the installation.
         restart_options = self._task(TaskInstallNetmodules).restart_options() | \
                           self._task(TaskInstallDockerClusterStore).restart_options()
-        self.restarting = self.restarting and restart_options
 
-        if restart_options and self.task_can_be_offered(TaskRestartComponents, offer):
+        if restart_options and \
+            self.task_can_be_offered(TaskRestartComponents, offer) and \
+            self.scheduler.can_restart_agent():
             # We require a restart and we haven't already scheduled one.
             _log.info("Schedule a restart task")
             return self.new_task(TaskRestartComponents,
                                  restart_options=restart_options)
-
-        # At this point we only continue when a restart is no longer required.
-        if self.restarting:
-            # Still require a restart to complete (or fail).
-            _log.info("Waiting for restart to be scheduled or to complete")
-            return None
 
         # If necessary start Calico node and Calico libnetwork driver
         if self.task_can_be_offered(TaskRunCalicoNode, offer):
@@ -420,6 +406,16 @@ class Agent(object):
         if not self.agent_syncd and all(task.clean for task in self.tasks.values()):
             self.agent_syncd = True
 
+    def is_restarting(self):
+        """
+        Return whether the agent is undergoing a component restart.
+        :return: True if agent is still undergoing a restart.
+        """
+        return (self._task[TaskRestartComponents] and
+                (not self.task_running(TaskRunEtcdProxy) or
+                 not self.task_finished(TaskInstallNetmodules) or
+                 not self.task_finished(TaskInstallDockerClusterStore)))
+
 
 class CalicoInstallerScheduler(mesos.interface.Scheduler):
     def __init__(self, max_concurrent_restarts=1, zk=None):
@@ -427,17 +423,11 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         self.max_concurrent_restart = max_concurrent_restarts
         self.zk = zk
 
-    def can_restart(self, agent):
+    def can_restart_agent(self):
         """
-        Determine if we are allowed to trigger an agent restart.  We rate
-        limit the number of restarts that we allow at any given time.
-        :param agent:  The agent that is requesting a restart.
-        :return: True if allowed, False otherwise.
+        Determine if we are allowed to trigger an agent restart.
         """
-        if agent.restarting:
-            _log.debug("Allowed to restart agent as already restarting")
-            return True
-        num_restarting = sum(1 for a in self.agents if a.restarting)
+        num_restarting = sum(1 for a in self.agents if a.is_restarting())
         return num_restarting < self.max_num_concurrent_restart
 
     def get_agent(self, agent_id):

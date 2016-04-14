@@ -1,8 +1,10 @@
 import os
-from mesos.interface import mesos_pb2
+
 import mesos.interface
 import mesos.native
-from calico_dcos.framework.framework import ZkDatastore, CalicoInstallerScheduler, _log
+from mesos.interface import mesos_pb2
+
+from src.calico_dcos import ZkDatastore, CalicoInstallerScheduler, _log
 
 if __name__ == "__main__":
     # Extract relevant configuration from our environment

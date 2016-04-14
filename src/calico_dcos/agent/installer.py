@@ -1,20 +1,20 @@
 import json
 import os
-import re
 import shutil
+import socket
 import sys
 import time
-import socket
+from collections import OrderedDict
 
 import psutil
-
 from calico_dcos.common.constants import (LOGFILE_INSTALLER,
     ACTION_INSTALL_NETMODULES, ACTION_CONFIGURE_DOCKER, ACTION_RESTART,
-    ACTION_CALICO_NODE, RESTART_DOCKER, RESTART_COMPONENTS,
+    ACTION_CALICO_NODE, RESTART_DOCKER, RESTART_AGENT, RESTART_COMPONENTS,
     MAX_TIME_FOR_DOCKER_RESTART, ACTION_GET_AGENT_IP,
     MESOS_MASTER_HOSTNAME, MESOS_MASTER_PORT)
 from calico_dcos.common.version import VERSION
-from calico_dcos.common.utils import setup_logging
+
+from src.calico_dcos.common.utils import setup_logging
 
 _log = setup_logging(LOGFILE_INSTALLER)
 
@@ -25,12 +25,21 @@ DOCKER_INSTALL_CONFIG = INSTALLER_CONFIG_DIR + "/docker"
 
 # Docker information for a standard Docker install.
 DOCKER_EXE = "/usr/bin/docker"
-DOCKER_DAEMON_RE = re.compile(".* daemon .*")
+DOCKER_DAEMON_PARMS = ["daemon"]
 DOCKER_DAEMON_CONFIG = "/etc/docker/daemon.json"
+
+# Docker information for a standard Docker install.
+AGENT_CONFIG = "/opt/mesosphere/etc/mesos-slave-common"
+AGENT_EXE = "/usr/bin/docker"
+AGENT_PARMS = ["daemon"]
+AGENT_MODULES_CONFIG = "/opt/mesosphere/etc/mesos-slave-modules.json"
 
 # Fixed address for our etcd proxy.
 CLUSTER_STORE_ETCD_PROXY = "etcd://127.0.0.1:2379"
 
+# Max time for process restarts (in seconds)
+MAX_TIME_FOR_DOCKER_RESTART = 30
+MAX_TIME_FOR_AGENT_RESTART = 30
 
 def ensure_dir(directory):
     """
@@ -41,58 +50,50 @@ def ensure_dir(directory):
         os.makedirs(directory)
 
 
-#TODO I think we just need a single regex to recognise the process.  Does p.cmdline()
-# include the executable or not?
-def find_process(executable, cmdline_re):
+def find_process(exe, parms):
     """
     Find the unique process specified by the executable and command line
     regexes.
 
-    :param executable:
-    :param cmdline_re:
+    :param exe:
+    :param parms:
     :return:
     """
-    processes = []
-    for p in psutil.process_iter():
-        _log.debug("%s == %s ?", p.exe(), executable)
-        if p.exe() == executable:
-            _log.debug("regex match: %s", p.cmdline())
-            if 'daemon' in p.cmdline():
-                processes.append(p)
+    processes = [
+        p for p in psutil.process_iter()
+        if p.exe() == exe and all(parm in p.cmdline() for parm in parms)
+    ]
 
-    if not processes:
-        print "Process not found for %s" % executable
-        sys.exit(1)
-
+    # Multiple processes suggests our query is not correct.
     if len(processes) > 1:
-        print "Found multiple matching processes for %s" % executable
+        _log.error("Found multiple matching processes: %s", exe)
         sys.exit(1)
 
     return processes[0]
 
 
-#TODO If signature of find_process() changes then so should this!
-def wait_for_process(executable, cmdline_re, max_wait):
+def wait_for_process(exe, parms, max_wait):
     """
     Locate the specified process, waiting a specified max time before giving
     up.  If the process can not be found within the time limit, the script
     exits.
-    :param executable:
-    :param cmdline_re:
+    :param exe:
+    :param parms:
     :param max_wait:
     :return:  The located process.
     """
     start = time.time()
-    process = find_process(executable, cmdline_re)
+    process = find_process(exe, parms)
     while not process and time.time() < start + max_wait:
         time.sleep(1)
-        process = find_process(executable, cmdline_re)
+        process = find_process(exe, parms)
 
     if not process:
-        print "Unable to locate process '%s'", executable
+        _log.error("Process not found within timeout: %s", exe)
         sys.exit(1)
 
     return process
+
 
 def load_config(filename):
     """
@@ -116,9 +117,51 @@ def store_config(filename, config):
     :param config:  The config (a simple dictionary)
     """
     ensure_dir(os.path.dirname(filename))
+    atomic_write(json.dumps(config))
+
+
+def load_property_file(filename):
+    """
+    Loads a file containing x=a,b,c... properties separated by newlines, and
+    returns an OrderedDict where the key is x and the value is [a,b,c...]
+    :param filename:
+    :return:
+    """
+    props = OrderedDict()
+    if not os.path.exists(filename):
+        return props
+    with open(filename) as f:
+        for line in f:
+            line = line.strip().split("=", 1)
+            if len(line) != 2:
+                continue
+            props[line[0].strip()] = line[2].split(",")
+    return props
+
+
+def store_property_file(filename, props):
+    """
+    Write a property file (see load_property_file)
+    :param filename:
+    :return:
+    """
+    config = "\n".join(prop + "=" + ",".join(vals)
+                       for prop, vals in props.iteritems())
+    atomic_write(filename, config)
+
+
+def atomic_write(filename, contents):
+    """
+    Atomic write a file, by first writing out a temporary file and then
+    moving into place.  The temporary filename is simply the supplied
+    filename with ".tmp" appended.
+    :param filename:
+    :param contents:
+    """
+    ensure_dir(os.path.dirname(filename))
     tmp = filename + ".tmp"
     with open(tmp, "w") as f:
-        f.write(json.dumps(config))
+        f.write(contents)
         f.flush()
         os.fsync(f.fileno())
     os.rename(tmp, filename)
@@ -173,48 +216,87 @@ def cmd_install_netmodules():
 
     :return:
     """
-    # Task URIS will have downloaded libmesos_network_isolator.so & calico_mesos to ./
-    # Move ./libmesos_network_isolator.so => /opt/mesosphere/lib/mesos/libmesos_network_isolator.so
-    # Move ./calico_mesos => /calico/calico_mesos
-    # Change the line in /opt/mesosphere/etc/mesos-slave-common that says:
-    # - MESOS_ISOLATION=cgroups/cpu,cgroups/mem,posix/disk,com_emccode_mesos_DockerVolumeDriverIsolator
-    # - to:
-    # - MESOS_ISOLATION=cgroups/cpu,cgroups/mem,posix/disk,com_emccode_mesos_DockerVolumeDriverIsolator,com_mesosphere_mesos_NetworkHook
-    #
-    # Add the following line to the end of /opt/mesosphere/etc/mesos-slave-common
-    # - MESOS_HOOKS=com_mesosphere_mesos_NetworkHook
-    #
-    # add net-modules entry to /opt/mesosphere/etc/mesos-slave-modules.json
-    # - see sample-modules.json in root of calico-dcos repo  for current modules.json
-    # - The following is what needs to be added:
-    """
-    {
-      "libraries": [
-        {
-          "file": "/opt/mesosphere/lib/libmesos_network_isolator.so",
-          "modules": [
+    # Load the current Calico install info for Docker, and the current Docker
+    # daemon configuration.
+    install_config = load_config(NETMODULES_INSTALL_CONFIG)
+    modules_config = load_config(AGENT_MODULES_CONFIG)
+    mesos_props = load_property_file(AGENT_CONFIG)
+
+    hooks = mesos_props.get("MESOS_HOOKS", [])
+    if "com_mesosphere_mesos_NetworkHook" not in hooks:
+        # Flag that config is updated and reset the create time, then update
+        # the config and copy the files.  Make sure the last thing we do is
+        # update the config that we check above.
+        _log.debug("Configure netmodules and calico in Mesos")
+        install_config["netmodules-updated"] = True
+        install_config["netmodules-created"] = None
+        store_config(NETMODULES_INSTALL_CONFIG, install_config)
+
+        # Copy the netmodules .so and the calico binary.
+        copy_file("./libmesos_network_isolator.so",
+                  "/opt/mesosphere/lib/mesos/libmesos_network_isolator.s")
+        copy_file("./calico_mesos",
+                  "/calico/calico_mesos")
+
+        # Update the modules config to reference the .so
+        modules_update = {
+          "libraries": [
             {
-              "name": "com_mesosphere_mesos_NetworkIsolator",
-              "parameters": [
+              "file": "/opt/mesosphere/lib/libmesos_network_isolator.so",
+              "modules": [
                 {
-                  "key": "isolator_command",
-                  "value": "/calico/calico_mesos"
+                  "name": "com_mesosphere_mesos_NetworkIsolator",
+                  "parameters": [
+                    {
+                      "key": "isolator_command",
+                      "value": "/calico/calico_mesos"
+                    },
+                    {
+                      "key": "ipam_command",
+                      "value": "/calico/calico_mesos"
+                    }
+                  ]
                 },
                 {
-                  "key": "ipam_command",
-                  "value": "/calico/calico_mesos"
+                  "name": "com_mesosphere_mesos_NetworkHook"
                 }
               ]
-            },
-            {
-              "name": "com_mesosphere_mesos_NetworkHook"
             }
           ]
         }
-      ]
-    }
-    """
-    return None
+        modules_config.update(modules_update)
+        store_config(AGENT_MODULES_CONFIG, modules_config)
+
+        # Finally update the properties.  We do this last, because this is what
+        # we check to see if files are copied into place.
+        mesos_props["MESOS_ISOLATION"].append("com_mesosphere_mesos_NetworkHook")
+        mesos_props["MESOS_HOOKS"] = ["com_mesosphere_mesos_NetworkHook"]
+        store_property_file(AGENT_CONFIG, mesos_props)
+
+    if not install_config.get("netmodules-updated"):
+        _log.debug("NetworkHook not updated by Calico")
+        return None
+
+    if not install_config.get("netmodules-created"):
+        # Mesos configuration was updated, store the current agent process
+        # ID and then indicate an agent restart is required.
+        _log.debug("Store agent creation time and indicate restart")
+        agent_process = wait_for_process(AGENT_EXE, AGENT_PARMS,
+                                         MAX_TIME_FOR_AGENT_RESTART)
+        install_config["version"] = VERSION
+        install_config["agent-created"] = str(agent_process.create_time())
+        store_config(NETMODULES_INSTALL_CONFIG, install_config)
+        return {RESTART_AGENT}
+
+    # If we updated the agent then check the process start time to determine
+    # if we need to restart the agent.
+    _log.debug("Restart agent if not using updated config")
+    agent_process = wait_for_process(AGENT_EXE, AGENT_PARMS,
+                                      MAX_TIME_FOR_AGENT_RESTART)
+    if install_config["agent-created"] == str(agent_process.create_time()):
+        return {RESTART_AGENT}
+    else:
+        return None
 
 
 def cmd_install_docker_cluster_store():
@@ -250,7 +332,7 @@ def cmd_install_docker_cluster_store():
     daemon_config = load_config(DOCKER_DAEMON_CONFIG)
 
     if "cluster-store" not in daemon_config:
-        # Before updating the config flag that config is updated, but dony yet
+        # Before updating the config flag that config is updated, but don't yet
         # put in the create time (we only do that after actually updating the
         # config.
         _log.debug("Configure cluster store in daemon config")
@@ -270,7 +352,8 @@ def cmd_install_docker_cluster_store():
         # Docker configuration was updated, store the current docker process
         # ID and then indicate a Docker restart is required.
         _log.debug("Store docker daemon creation time and indicate restart")
-        daemon_process = find_process(DOCKER_EXE, DOCKER_DAEMON_RE)
+        daemon_process = wait_for_process(DOCKER_EXE, DOCKER_DAEMON_PARMS,
+                                          MAX_TIME_FOR_DOCKER_RESTART)
         install_config["version"] = VERSION
         install_config["docker-created"] = str(daemon_process.create_time())
         store_config(DOCKER_INSTALL_CONFIG, install_config)
@@ -279,7 +362,8 @@ def cmd_install_docker_cluster_store():
     # If we updated Docker the check the process start time to determine if we
     # need to restart docker.
     _log.debug("Restart docker if not using updated config")
-    daemon_process = find_process(DOCKER_EXE, DOCKER_DAEMON_RE)
+    daemon_process = wait_for_process(DOCKER_EXE, DOCKER_DAEMON_PARMS,
+                                      MAX_TIME_FOR_DOCKER_RESTART)
     if install_config["docker-created"] == str(daemon_process.create_time()):
         return {RESTART_DOCKER}
     else:
@@ -307,15 +391,16 @@ def cmd_restart_components():
     # back online.
     if RESTART_DOCKER in sys.argv:
         _log.debug("Restarting Docker daemon")
-        daemon_process = wait_for_process(DOCKER_EXE, DOCKER_DAEMON_RE,
+        daemon_process = wait_for_process(DOCKER_EXE, DOCKER_DAEMON_PARMS,
                                           MAX_TIME_FOR_DOCKER_RESTART)
         daemon_process.kill()
         _log.debug("Docker daemon killed")
 
-        wait_for_process(DOCKER_EXE, DOCKER_DAEMON_RE,
+        wait_for_process(DOCKER_EXE, DOCKER_DAEMON_PARMS,
                          MAX_TIME_FOR_DOCKER_RESTART)
         _log.debug("Docker daemon restarted")
     return None
+
 
 def cmd_get_agent_ip():
     """
@@ -350,8 +435,6 @@ if __name__ == "__main__":
         output_restart_components(components)
     elif action == ACTION_RESTART:
         cmd_restart_components()
-    elif action == ACTION_CALICO_NODE:
-        cmd_run_calico_node()
     elif action == ACTION_GET_AGENT_IP:
         print(cmd_get_agent_ip())
     else:
