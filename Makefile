@@ -11,7 +11,7 @@ dist/calico_installer: $(CALICO_MESOS_FILES)
 	# Build the mesos plugin
 	docker build -t calico/dcos-builder -f Dockerfile.installer .
 	docker run --rm \
-         -v `pwd`/calico_dcos/:/code/calico_dcos \
+         -v `pwd`/installer/:/code \
          -v `pwd`/dist/:/code/dist \
 	     calico/dcos-builder \
-	     pyinstaller calico_dcos/agent/installer.py -ayF
+	     pyinstaller installer/installer.py -ayF

@@ -2,8 +2,6 @@ FROM python:2.7
 MAINTAINER Dan Osborne <daniel@projectcalico.org>
 
 WORKDIR /code/
-#RUN apt-get update && \
-#    apt-get install -qy python-dev python-pip git libffi-dev libssl-dev procps
 
 RUN pip install --upgrade pip
 RUN pip install PyInstaller

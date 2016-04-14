@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import shutil
 import socket
@@ -7,12 +8,8 @@ import time
 from collections import OrderedDict
 
 import psutil
-from calico_dcos.common.constants import (LOGFILE_INSTALLER,
-    MESOS_MASTER_HOSTNAME, MESOS_MASTER_PORT)
 
-from calico_dcos.common.utils import setup_logging
-
-_log = setup_logging(LOGFILE_INSTALLER)
+_log = logging.getLogger(__name__)
 
 # Calico installation config files
 INSTALLER_CONFIG_DIR = "/etc/calico/installer"
@@ -36,6 +33,7 @@ CLUSTER_STORE_ETCD_PROXY = "etcd://127.0.0.1:2379"
 # Max time for process restarts (in seconds)
 MAX_TIME_FOR_DOCKER_RESTART = 30
 MAX_TIME_FOR_AGENT_RESTART = 30
+
 
 def ensure_dir(directory):
     """
@@ -139,7 +137,7 @@ def store_property_file(filename, props):
     """
     Write a property file (see load_property_file)
     :param filename:
-    :return:
+    :param props:
     """
     config = "\n".join(prop + "=" + ",".join(vals)
                        for prop, vals in props.iteritems())
@@ -166,6 +164,8 @@ def atomic_write(filename, contents):
 def copy_file(from_file, to_file):
     """
     Checks if the file exists and if not moves it into place.
+    :param from_file:
+    :param to_file:
     :return: Whether the file was moved.
     """
     if os.path.exists(to_file):
@@ -173,14 +173,6 @@ def copy_file(from_file, to_file):
     ensure_dir(os.path.dirname(to_file))
     shutil.copy(from_file, to_file)
     return True
-
-
-def output_restart_components(components):
-    """
-    Output to stdout which components need restarting.
-    :param components:
-    """
-    print RESTART_COMPONENTS + ",".join(components or [])
 
 
 def cmd_install_netmodules():
@@ -194,50 +186,55 @@ def cmd_install_netmodules():
     modules_config = load_config(AGENT_MODULES_CONFIG)
     mesos_props = load_property_file(AGENT_CONFIG)
 
-    hooks = mesos_props.get("MESOS_HOOKS", [])
-    if "com_mesosphere_mesos_NetworkHook" not in hooks:
-        # Flag that config is updated and reset the create time, then update
-        # the config and copy the files.  Make sure the last thing we do is
-        # update the config that we check above.
+    libraries = modules_config.get("libraries", [])
+    files = [library.get("file") for library in libraries]
+    if "/opt/mesosphere/lib/libmesos_network_isolator.so" not in files:
+        # Flag that modules need to be updated and reset the agent create
+        # time to ensure we restart the agent.
         _log.debug("Configure netmodules and calico in Mesos")
-        install_config["netmodules-updated"] = True
-        install_config["netmodules-created"] = None
+        install_config["modules-updated"] = True
+        install_config["agent-created"] = None
         store_config(NETMODULES_INSTALL_CONFIG, install_config)
 
         # Copy the netmodules .so and the calico binary.
         copy_file("./libmesos_network_isolator.so",
-                  "/opt/mesosphere/lib/mesos/libmesos_network_isolator.s")
+                  "/opt/mesosphere/lib/mesos/libmesos_network_isolator.so")
         copy_file("./calico_mesos",
                   "/calico/calico_mesos")
 
         # Update the modules config to reference the .so
-        modules_update = {
-          "libraries": [
+        new_library = {
+          "file": "/opt/mesosphere/lib/libmesos_network_isolator.so",
+          "modules": [
             {
-              "file": "/opt/mesosphere/lib/libmesos_network_isolator.so",
-              "modules": [
+              "name": "com_mesosphere_mesos_NetworkIsolator",
+              "parameters": [
                 {
-                  "name": "com_mesosphere_mesos_NetworkIsolator",
-                  "parameters": [
-                    {
-                      "key": "isolator_command",
-                      "value": "/calico/calico_mesos"
-                    },
-                    {
-                      "key": "ipam_command",
-                      "value": "/calico/calico_mesos"
-                    }
-                  ]
+                  "key": "isolator_command",
+                  "value": "/calico/calico_mesos"
                 },
                 {
-                  "name": "com_mesosphere_mesos_NetworkHook"
+                  "key": "ipam_command",
+                  "value": "/calico/calico_mesos"
                 }
               ]
+            },
+            {
+              "name": "com_mesosphere_mesos_NetworkHook"
             }
           ]
         }
-        modules_config.update(modules_update)
+        modules_config.setdefault("libraries", []).append(new_library)
         store_config(AGENT_MODULES_CONFIG, modules_config)
+
+    hooks = mesos_props.get("MESOS_HOOKS", [])
+    if "com_mesosphere_mesos_NetworkHook" not in hooks:
+        # Flag that properties need to be updated and reset the agent create
+        # time to ensure we restart the agent.
+        _log.debug("Configure mesos properties")
+        install_config["properties-updated"] = True
+        install_config["agent-created"] = None
+        store_config(NETMODULES_INSTALL_CONFIG, install_config)
 
         # Finally update the properties.  We do this last, because this is what
         # we check to see if files are copied into place.
@@ -245,14 +242,15 @@ def cmd_install_netmodules():
         mesos_props["MESOS_HOOKS"] = ["com_mesosphere_mesos_NetworkHook"]
         store_property_file(AGENT_CONFIG, mesos_props)
 
-    # If a network hook was installed, but not by Calico, exit.
-    if not install_config.get("netmodules-updated"):
+    # If nothing was updated then exit.
+    if not install_config.get("modules-updated") and \
+       not install_config.get("properties-updated"):
         _log.debug("NetworkHook not updated by Calico")
         return
 
     # If we haven't stored the current agent creation time, then do so now.
     # We use this to track when the agent has restarted with our new config.
-    if not install_config.get("netmodules-created"):
+    if not install_config.get("agent-created"):
         _log.debug("Store agent creation time")
         agent_process = wait_for_process(AGENT_EXE, AGENT_PARMS,
                                          MAX_TIME_FOR_AGENT_RESTART)
@@ -325,38 +323,6 @@ def cmd_install_docker_cluster_store():
     daemon_process.kill()
 
 
-def cmd_restart_components():
-    """
-    Command to restart the following components:
-    -  Docker daemon
-    -  Mesos Agent process
-    This command does not block.
-
-    If the InstallDockerClusterStore task indicated that a restart is required
-    then kill the Docker daemon and wait for it to restart.
-
-    If the InstallNetmodules task indicated that a restart is required then
-    kill the agent process.
-
-    :return:
-    """
-    _log.info("Restarting required components")
-
-    # If a Docker restart is required, kill the process and wait for it to come
-    # back online.
-    if RESTART_DOCKER in sys.argv:
-        _log.debug("Restarting Docker daemon")
-        daemon_process = wait_for_process(DOCKER_EXE, DOCKER_DAEMON_PARMS,
-                                          MAX_TIME_FOR_DOCKER_RESTART)
-        daemon_process.kill()
-        _log.debug("Docker daemon killed")
-
-        wait_for_process(DOCKER_EXE, DOCKER_DAEMON_PARMS,
-                         MAX_TIME_FOR_DOCKER_RESTART)
-        _log.debug("Docker daemon restarted")
-    return None
-
-
 def cmd_get_agent_ip():
     """
     Connects a socket to the DNS entry for mesos master and returns
@@ -365,19 +331,21 @@ def cmd_get_agent_ip():
 
     Prints the IP to stdout
     """
+    # IP and port are supplied as arguments
+    host = sys.argv[2]
+    port = sys.argv[3]
+
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect((MESOS_MASTER_HOSTNAME, MESOS_MASTER_PORT))
-        agent_ip =  s.getsockname()[0]
+        s.connect((host, port))
+        our_ip = s.getsockname()[0]
         s.close()
     except socket.gaierror:
         # Return an error signal to kill the task, so the process
         # doesn't continue on to launch calicoctl
-        _log.error("Unable to connect to master at: %s:%d",
-                   MESOS_MASTER_HOSTNAME,
-                   MESOS_MASTER_PORT)
+        _log.error("Unable to connect to master at: %s:%d", host, port)
         sys.exit(1)
-    print agent_ip
+    print our_ip
 
 
 if __name__ == "__main__":

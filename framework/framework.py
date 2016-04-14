@@ -27,32 +27,26 @@ Description:
   Mesos framework used to install Calico in a Mesos cluster..
 """
 import json
+import logging
 
 import mesos.interface
 import mesos.native
-from calico_dcos.common.constants import LOGFILE_FRAMEWORK
 from kazoo.client import KazooClient, NoNodeError, NodeExistsError
 from mesos.interface import mesos_pb2
 
-from calico_dcos.common.utils import setup_logging
+from config import config
 from tasks import (Task, TaskRunEtcdProxy, TaskInstallDockerClusterStore,
-                   TaskInstallNetmodules, TaskRestartComponents,
-                   TaskRunCalicoNode, TaskRunCalicoLibnetwork)
+    TaskInstallNetmodules, TaskRunCalicoNode, TaskRunCalicoLibnetwork)
 
-_log = setup_logging(LOGFILE_FRAMEWORK)
+_log = logging.getLogger(__name__)
 
 # TODO
 # o  Need to check CPU/Mem for each calico task
 # o  Check that a task can reboot the agent (quick test to make sure this will fly)
-# o  What happens if a framework is killed
 # o  Can we determine what slave the framework is running on?  That would help limit the issues
 #    caused by restart - worst case scenario is we keep restarting the node that runs the framework...
 #    kill one agent, framework moves to another, then we next that agent...and so on.  Shouldn't actually
 #    matter, but it would slow things down.
-# o  Framework could ultimately have a web UI - so launch with a known DNS entry so you can point
-#    a browser to determine current calico status.  Tasks could perform periodic checks on calico
-# o  Suppress offers when calico services are running
-# o  Revive offers when calico services are not running
 
 # Need the following input parms:
 # -  Number of agents that can be restarted at once
@@ -70,6 +64,7 @@ TASKS_BY_CLASSNAME = {cls.__name__: cls for cls in TASK_ORDER}
 
 # The ZooKeeper Calico agent directory
 ZK_AGENT_DIR = "/calico-framework/agent"
+
 
 class ZkDatastore(object):
     def __init__(self, url):
@@ -208,15 +203,22 @@ class Agent(object):
         # then schedule it if we can.  If we can't schedule the required task
         # then exit - we will attempt to schedule next offer.
         for task_class in TASK_ORDER:
+            _log.debug("Handling task: '%s'", task_class.__name__)
+            if not task_class.allowed():
+                _log.debug("Task is not allowed - skip")
+
             if self.task_needs_scheduling(task_class):
-                if self.task_can_be_offered():
+                _log.debug("Task needs scheduling")
+                if self.task_can_be_offered(task_class, offer):
+                    _log.debug("Task can be offered")
                     return self.new_task(task_class)
                 else:
+                    _log.debug("Task cannot be offered - wait")
                     return None
 
         _log.debug("All tasks are running, suppress offers")
         self.offers_suppressed = True
-        self.driver.suppressOffers()
+        driver.suppressOffers()
         return None
 
     def trigger_resync(self, driver):
@@ -272,14 +274,15 @@ class Agent(object):
         :param offer:
         :return:
         """
-        return task_class.can_accept_offer(offer) and \
-               (task_class.restarts or self.scheduler.can_restart_agent())
+        return (task_class.can_accept_offer(offer) and
+                (not task_class.restarts or
+                 self.scheduler.can_restart_agent(self)))
 
     def task_needs_scheduling(self, task_class):
         """
         Whether a task needs scheduling.  A task needs scheduling if:
          -  it has not yet been run
-         -  the version of the previous run is different to the version of the
+         -  the hash of the previous run is different to the hash of the
             current task
          -  if the task failed
          -  if the task is persistent, but the current state indicates that it
@@ -293,9 +296,9 @@ class Agent(object):
             _log.debug("Task '%s' has not yet been run", task_class)
             return True
 
-        if task.version != task_class.version:
+        if task.hash != task_class.hash:
             _log.debug("Task '%s' has been changed.  Prev=%s, Curr=%s",
-                       task_class, task.version, task_class.version)
+                       task_class, task.hash, task_class.hash)
             return True
 
         if task.failed():
@@ -334,6 +337,7 @@ class Agent(object):
         """
         Handle a task update.  If we were resync-ing then check if we have
         completed the sync.
+        :param driver:
         :param update:
         """
         # Extract the task classname from the task ID and update the task.
@@ -346,8 +350,8 @@ class Agent(object):
             _log.debug("Task is not recognised - ignoring")
             return
         _log.debug("TASK_UPDATE - %s: %s",
-                mesos_pb2.TaskState.Name(update.state),
-                task)
+                   mesos_pb2.TaskState.Name(update.state),
+                   task)
 
         # Update the task.
         task.update(update)
@@ -375,26 +379,34 @@ class Agent(object):
         if self.offers_suppressed:
             _log.debug("Revive offers for agent")
             driver.reviveOffers()
+            self.offers_suppressed = False
 
     def is_restarting(self):
         """
-        Return whether a component restart is in progress.
+        Return whether a component restart is in progress.  A restart is in
+        progress when a restart task is not finished.
         :return: True if any restart task is in progress.
         """
         return any(t.restarts and not t.finished() for t in self.tasks)
 
 
 class CalicoInstallerScheduler(mesos.interface.Scheduler):
-    def __init__(self, max_concurrent_restarts=1, zk=None):
+    def __init__(self):
         self.agents = {}
-        self.max_concurrent_restart = max_concurrent_restarts
-        self.zk = zk
+        self.zk = ZkDatastore(config.zk_persist_url)
 
-    def can_restart_agent(self):
+    def can_restart_agent(self, agent):
         """
         Determine if we are allowed to trigger an agent restart.
+
+        We only allow a maximum number of agents to be restarted at the same
+        time.  We can ignore the requesting agent in the count.
+
+        :param agent:
+        :return: True if the agent can be restarted, False otherwise.
         """
-        num_restarting = sum(1 for a in self.agents if a.is_restarting())
+        num_restarting = sum(1 for a in self.agents if a.is_restarting()
+                               if a != agent)
         return num_restarting < self.max_num_concurrent_restart
 
     def get_agent(self, agent_id):
@@ -470,3 +482,32 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         # Not obvious if this is actually required.  We probably need to track
         # offer to speed things up, but I don't believe it's strictly necessary.
         _log.info("Offer rescinded for offer ID %s", offer_id)
+
+
+def launch_framework():
+    """
+    Launch the Calico framework.
+    :return: The Mesos driver.  The caller should call driver.join() to ensure
+    thread is blocked until driver exits.
+    """
+    _log.info("Connecting to Master: %s", config.master_ip)
+    framework = mesos_pb2.FrameworkInfo()
+    framework.user = "root"  # Have Mesos fill in the current user.
+    framework.name = "Calico framework"
+    framework.principal = "calico-framework"
+    framework.id.value = "calico-framework"
+    framework.failover_timeout = 604800
+
+    _log.info("Launching Calico Mesos scheduler")
+    scheduler = CalicoInstallerScheduler()
+    driver = mesos.native.MesosSchedulerDriver(scheduler,
+                                               framework,
+                                               config.master_ip)
+    driver.start()
+    return driver
+
+
+if __name__ == "__main__":
+    fdriver = launch_framework()
+    fdriver.join()
+    fdriver.join()

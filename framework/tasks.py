@@ -1,18 +1,24 @@
+import hashlib
+import logging
 import uuid
 from datetime import datetime
 
-from calico_dcos.common.constants import (LOGFILE_FRAMEWORK,
-    TASK_MEM, TASK_CPUS, RESTART_COMPONENTS, CALICOCTL_BINARY_URL,
-    ACTION_GET_AGENT_IP, ETCD_BINARY_URL, NETMODULES_SO_URL, INSTALLER_URL)
 from mesos.interface import mesos_pb2
 
-from calico_dcos.common.utils import setup_logging
+from config import config
 
-_log = setup_logging(LOGFILE_FRAMEWORK)
+_log = logging.getLogger(__name__)
+
+#TODO We need a better way of handling which .so we need!
+NETMODULES_SO_URL = "http://172.25.20.11/net-modules.so"
+
+# Expected task CPUs and Mem usage
+TASK_CPUS = 0.1
+TASK_MEM = 128.0
 
 
 class Task(object):
-    version = None
+    hash = None
     cpus = None
     mem = None
     restarts = None
@@ -24,7 +30,7 @@ class Task(object):
         self.created = kwargs.get("created") or str(datetime.utcnow())
         self.updated = kwargs.get("updated") or "NA"
         self.task_id = kwargs.get("task_id") or self.new_task_id()
-        self.version = kwargs.get("version") or self.version
+        self.hash = kwargs.get("hash") or self.hash
         self.healthy = True
         self.clean = True
         """
@@ -33,7 +39,7 @@ class Task(object):
         """
 
         # Assert that class data has been overridden.
-        assert self.version is not None
+        assert self.hash is not None
         assert self.cpus is not None
         assert self.mem is not None
         assert self.restarts is not None
@@ -113,9 +119,17 @@ class Task(object):
             "state": self.state,
             "created": self.created,
             "updated": self.updated,
-            "version": self.version
+            "hash": self.hash
         }
         return task_dict
+
+    @classmethod
+    def allowed(cls):
+        """
+        Whether this task is allowed.
+        :return: True
+        """
+        return True
 
     @classmethod
     def from_dict(cls, task_dict):
@@ -142,18 +156,18 @@ class Task(object):
     @classmethod
     def classname_from_task_id(cls, task_id):
         classname_suffix, _uuid = task_id.split("-", 1)
-        return "Tasks" + classname_prefix
+        return "Task" + classname_suffix
 
     @classmethod
     def new_task_id(cls):
-        return = cls.__name__[4:] + "-" + uuid.uuid4().upper()
+        return cls.__name__[4:] + "-" + uuid.uuid4().upper()
 
 
 class TaskRunEtcdProxy(Task):
     """
     Task to run an etcd proxy.
     """
-    version = 0
+    hash = hashlib.sha256(config.etcd_binary_url).hexdigest()
     persistent = True
     restarts = False
     cpus = TASK_CPUS
@@ -161,14 +175,22 @@ class TaskRunEtcdProxy(Task):
     description = "Calico: etcd proxy"
 
     def as_new_mesos_task(self, agent_id):
+        etcd_download = config.etcd_binary_url.rsplit("/", 1)
+        if etcd_download.endswith(".tar.gz"):
+            etcd_img = "./%s/etcd" % etcd_download[:-7]
+        else:
+            etcd_img = "./%s" % etcd_download
+
         task = self.new_default_task(agent_id)
         task.container.type = mesos_pb2.ContainerInfo.MESOS
-        task.command.value = "./etcd-v2.3.1-linux-amd64/etcd --proxy=on --discovery-srv=etcd.mesos"
+        task.command.value = etcd_img + \
+                             " --proxy=on " + \
+                             "--discovery-srv=" + config.etcd_discovery
         task.command.user = "root"
 
         # Download etcd binary
         uri = task.command.uris.add()
-        uri.value = ETCD_BINARY_URL
+        uri.value = config.etcd_proxy_binary_url
         uri.executable = False
         uri.cache = True
         uri.extract = True
@@ -180,7 +202,7 @@ class TaskInstallDockerClusterStore(Task):
     """
     Task to install Docker configuration for Docker multi-host networking.
     """
-    version = 0
+    hash = 0
     persistent = False
     restarts = True
     cpus = TASK_CPUS
@@ -192,21 +214,28 @@ class TaskInstallDockerClusterStore(Task):
         task.command.value = "./installer docker"
         task.command.user = "root"
 
-
         # Download the installer binary
         uri = task.command.uris.add()
-        uri.value = INSTALLER_URL
+        uri.value = config.installer
         uri.executable = True
         uri.cache = False
-
         return task
+
+    @classmethod
+    def allowed(cls):
+        """
+        Whether this task is allowed.
+        :return: True
+        """
+        _log.debug("Allow docker update: %s", config.allow_docker_update)
+        return config.allow_docker_update
 
 
 class TaskInstallNetmodules(Task):
     """
     Task to install netmodules and Calico plugin.
     """
-    version = 0
+    hash = 0
     persistent = False
     restarts = True
     cpus = TASK_CPUS
@@ -218,21 +247,28 @@ class TaskInstallNetmodules(Task):
         task.command.value = "./installer netmodules"
         task.command.user = "root"
 
-
         # Download the Netmodules .so
         uri = task.command.uris.add()
         uri.value = NETMODULES_SO_URL
         uri.executable = True
         uri.cache = True
-
         return task
+
+    @classmethod
+    def allowed(cls):
+        """
+        Whether this task is allowed.
+        :return: True
+        """
+        _log.debug("Allow agent update: %s", config.allow_agent_update)
+        return config.allow_agent_update
 
 
 class TaskRunCalicoNode(Task):
     """
     Task to run Calico node.
     """
-    version = 0
+    hash = hashlib.sha256(config.calicoctl_url).hexdigest()
     persistent = True
     restarts = False
     cpus = TASK_CPUS
@@ -240,21 +276,22 @@ class TaskRunCalicoNode(Task):
     description = "Calico: daemon"
 
     def as_new_mesos_task(self, agent_id):
+        cmd_ip = "$(./installer ip %s %s)" % (config.master_host,
+                                              config.master_port)
         task = self.new_default_task(agent_id)
-        task.command.value = "./calicoctl node --detach=false --ip=$(./installer ip)"
+        task.command.value = "./calicoctl node --detach=false --ip=" + cmd_ip
         task.command.user = "root"
-
 
         # Add a URI for downloading the calicoctl binary
         uri = task.command.uris.add()
-        uri.value = CALICOCTL_BINARY_URL
+        uri.value = config.calicoctl_url
         uri.executable = True 
         uri.cache = True
         uri.extract = False
 
         # Download the installer binary
         uri = task.command.uris.add()
-        uri.value = INSTALLER_URL
+        uri.value = config.installer_url
         uri.executable = True
         uri.cache = True
 
@@ -265,12 +302,12 @@ class TaskRunCalicoLibnetwork(Task):
     """
     Task to run an Calico libnetwork.
     """
-    version = 0
     persistent = True
     restarts = False
     cpus = TASK_CPUS
     mem = TASK_MEM
     description = "Calico: Docker networking driver"
+    hash = hashlib.sha256(config.libnetwork_img).hexdigest()
 
     def as_new_mesos_task(self, agent_id):
         """
@@ -280,7 +317,7 @@ class TaskRunCalicoLibnetwork(Task):
         task = self.new_default_task(agent_id)
 
         task.container.type = mesos_pb2.ContainerInfo.DOCKER
-        task.container.docker.image = "calico/node-libnetwork:latest"
+        task.container.docker.image = config.libnetwork_img
         task.command.shell = False
 
         # Volume mount in /run/docker/plugins
