@@ -2,50 +2,46 @@ import uuid
 from datetime import datetime
 
 from calico_dcos.common.constants import (LOGFILE_FRAMEWORK,
-    ACTION_RUN_ETCD_PROXY, ACTION_INSTALL_NETMODULES, ACTION_CONFIGURE_DOCKER,
-    ACTION_RESTART, ACTION_CALICO_NODE, ACTION_CALICO_LIBNETWORK,
     TASK_MEM, TASK_CPUS, RESTART_COMPONENTS, CALICOCTL_BINARY_URL,
     ACTION_GET_AGENT_IP, ETCD_BINARY_URL, NETMODULES_SO_URL, INSTALLER_URL)
 from mesos.interface import mesos_pb2
 
-from src.calico_dcos.common.utils import setup_logging
+from calico_dcos.common.utils import setup_logging
 
 _log = setup_logging(LOGFILE_FRAMEWORK)
 
 
 class Task(object):
-    action = None
     version = None
-    description = None
-    cpu = None
+    cpus = None
     mem = None
-
+    restarts = None
+    description = None
+    persistent = None
 
     def __init__(self, **kwargs):
         self.state = kwargs.get("state") or mesos_pb2.TASK_STAGING
         self.created = kwargs.get("created") or str(datetime.utcnow())
         self.updated = kwargs.get("updated") or "NA"
-        self.stdout = kwargs.get("stdout") or RESTART_COMPONENTS   #TODO Fix
-
-        # Create a task ID if not supplied.
-        assert self.action is not None, "Action has not been overridden by " \
-                                        "subclass"
-        self.task_id = kwargs.get("task_id") or "%s-%s" % (self.action,
-                                                           uuid.uuid4())
-
-        # Update the version from the one supplied, otherwise default to the
-        # current task version.  If None, then the subclass has not overridden
-        # the value.
+        self.task_id = kwargs.get("task_id") or self.new_task_id()
         self.version = kwargs.get("version") or self.version
-        assert self.version is not None, "Version has not been overridden " \
-                                         "by subclass"
-
         self.healthy = True
         self.clean = True
         """
         Tasks loaded from the persistent store are not considered clean until
         the status has been updated from a query.
         """
+
+        # Assert that class data has been overridden.
+        assert self.version is not None
+        assert self.cpus is not None
+        assert self.mem is not None
+        assert self.restarts is not None
+        assert self.description is not None
+        assert self.persistent is not None
+
+        # Cannot have a persistent restart task.
+        assert not self.persistent or not self.restarts
 
     def as_new_mesos_task(self, agent_id):
         raise NotImplementedError()
@@ -56,13 +52,11 @@ class Task(object):
     def __str__(self):
         return self.__repr__()
 
-    def cmd(self):
-        raise NotImplementedError()
-
     def new_default_task(self, agent_id):
         """
-        Take the information stored in this Task object and fill a
-        mesos task.
+        Return a Task object containing common information for all task types.
+        This is just a helper method that may be used by the as_new_mesos_task
+        implementations.
         """
         task = mesos_pb2.TaskInfo()
         task.name = repr(self)
@@ -72,15 +66,12 @@ class Task(object):
         cpus = task.resources.add()
         cpus.name = "cpus"
         cpus.type = mesos_pb2.Value.SCALAR
-        cpus.scalar.value = TASK_CPUS
+        cpus.scalar.value = self.cpus
 
         mem = task.resources.add()
         mem.name = "mem"
         mem.type = mesos_pb2.Value.SCALAR
-        mem.scalar.value = TASK_MEM
-
-        task.command.value = self.cmd()
-        task.command.user = "root"
+        mem.scalar.value = self.mem
 
         return task
 
@@ -101,16 +92,14 @@ class Task(object):
     def update(self, update):
         _log.info("Updating status of %s from %d to %d",
                   self, self.state, update.state)
-        self.time_updated = str(datetime.utcnow())
+        self.updated = str(datetime.utcnow())
         self.state = update.state
         self.clean = True
-        #TODO
-        #self.stdout = xxxx
 
     def get_task_status(self, agent):
         """
         Return a TaskStatus object for this Task.
-        :return: A TaskStatus
+        :return: A Mesos TaskStatus instance.
         """
         task_status = mesos_pb2.TaskStatus()
         task_status.slave_id.value = agent.agent_id
@@ -118,32 +107,10 @@ class Task(object):
         task_status.state = self.state
         return task_status
 
-    def restart_options(self):
-        """
-        Return the set of restart options parsed from the command output.
-        :return:
-        """
-        # We should only be checking if the task actually finished, and if the
-        # task returns a list of components to restart.
-        assert self.finished()
-
-        components = None
-        for line in self.stdout.split("\n"):
-            if line.startswith(RESTART_COMPONENTS):
-                value = line[len(RESTART_COMPONENTS):]
-                components = {c.strip() for c in value.split(",")}
-                break
-        if components is None:
-            _log.error("Attempting to find restart components from task that "
-                       "does not require restarts.")
-            raise AssertionError("Not expecting restart components")
-        return components
-
     def to_dict(self):
         task_dict = {
             "task_id": self.task_id,
             "state": self.state,
-            "stdout": self.stdout,
             "created": self.created,
             "updated": self.updated,
             "version": self.version
@@ -173,31 +140,31 @@ class Task(object):
         return True
 
     @classmethod
-    def action_from_task_id(cls, task_id):
-        action, _uuid = task_id.split("-", 1)
-        return action
+    def classname_from_task_id(cls, task_id):
+        classname_suffix, _uuid = task_id.split("-", 1)
+        return "Tasks" + classname_prefix
+
+    @classmethod
+    def new_task_id(cls):
+        return = cls.__name__[4:] + "-" + uuid.uuid4().upper()
 
 
 class TaskRunEtcdProxy(Task):
     """
-    Task to run an etcd proxy.  This is a long-running task, if the task fails
-    it will be restarted.
-
-    The task does the following:
-    -  Starts an etcd proxy listening on port 2379.
-    -  Performs regular health checks
+    Task to run an etcd proxy.
     """
-    action = ACTION_RUN_ETCD_PROXY
-    version = 0  # Increment if the run task needs to be re-executed in new
-                 # release
+    version = 0
     persistent = True
-
-    def cmd(self):
-        return "./etcd-v2.3.1-linux-amd64/etcd --proxy=on --discovery-srv=etcd.mesos"
+    restarts = False
+    cpus = TASK_CPUS
+    mem = TASK_MEM
+    description = "Calico: etcd proxy"
 
     def as_new_mesos_task(self, agent_id):
         task = self.new_default_task(agent_id)
         task.container.type = mesos_pb2.ContainerInfo.MESOS
+        task.command.value = "./etcd-v2.3.1-linux-amd64/etcd --proxy=on --discovery-srv=etcd.mesos"
+        task.command.user = "root"
 
         # Download etcd binary
         uri = task.command.uris.add()
@@ -209,43 +176,48 @@ class TaskRunEtcdProxy(Task):
         return task
 
 
-class TaskInstallNetmodules(Task):
+class TaskInstallDockerClusterStore(Task):
     """
-    Task to install netmodules and Calico plugin.  This is short-lived task.
-
-    The task writes to stdout the following
-      restart-agent-yes
-      restart-agent-no
-    depending on whether a restart of the agent is required or not.
-
-    The task does the following:
-    -  Reads the /choose/a/directory/agent-start file if it exists.  It
-       contains the start time of the agent process at the point the
-       netmodules/calico files were installed.
-       -  If the file exists and the time is different to the current time then
-          return restart-agent-no.
-       -  If the file exists and the time is the same as the current time then
-          return restart-agent-yes.
-       -  Otherwise:
-          -  Installs netmodules, the calico plugin and all necessary
-             configuration files.
-             Note: Files are modified in an order that, should the task fail
-             part way through, the agent will still be able to restart
-             successfully.
-          -  Write out the file /choose/a/directory/agent-start containing a
-             timestamp of the agent start time.
-          -  Return restart-agent-yes
+    Task to install Docker configuration for Docker multi-host networking.
     """
-    action = ACTION_INSTALL_NETMODULES
-    version = 0  # Increment if the run task needs to be re-executed in new
-                 # release
+    version = 0
     persistent = False
-
-    def cmd(self):
-        return "./installer %s" % self.action
+    restarts = True
+    cpus = TASK_CPUS
+    mem = TASK_MEM
+    description = "Calico: install Docker multi-host networking"
 
     def as_new_mesos_task(self, agent_id):
         task = self.new_default_task(agent_id)
+        task.command.value = "./installer docker"
+        task.command.user = "root"
+
+
+        # Download the installer binary
+        uri = task.command.uris.add()
+        uri.value = INSTALLER_URL
+        uri.executable = True
+        uri.cache = False
+
+        return task
+
+
+class TaskInstallNetmodules(Task):
+    """
+    Task to install netmodules and Calico plugin.
+    """
+    version = 0
+    persistent = False
+    restarts = True
+    cpus = TASK_CPUS
+    mem = TASK_MEM
+    description = "Calico: install netmodules and plugin"
+
+    def as_new_mesos_task(self, agent_id):
+        task = self.new_default_task(agent_id)
+        task.command.value = "./installer netmodules"
+        task.command.user = "root"
+
 
         # Download the Netmodules .so
         uri = task.command.uris.add()
@@ -256,103 +228,22 @@ class TaskInstallNetmodules(Task):
         return task
 
 
-class TaskInstallDockerClusterStore(Task):
-    """
-    Task to install Docker configuration for Docker multi-host networking.
-
-    The task writes to stdout the following
-      restart-docker-yes
-      restart-docker-no
-    depending on whether a restart of the docker daemon is required or not.
-
-    This task does the following:
-    -  Reads the /choose/a/directory/docker-start file if it exists.  It
-       contains the start time of the docker daemon at the point the
-       docker config file was installed or updated.
-       -  If the file exists and the time is different to the current time then
-          return restart-docker-no.
-       -  If the file exists and the time is the same as the current time then
-          return restart-docker-yes.
-       -  Otherwise:
-          -  Update the /etc/docker/daemon.json file to include the cluster
-             store information.
-          -  Write out the file /choose/a/directory/docker-start containing a
-             timestamp of the docker daemon start time.
-          -  Return restart-docker-yes
-    """
-    action = ACTION_CONFIGURE_DOCKER
-    version = 0  # Increment if the run task needs to be re-executed in new
-                 # release
-    persistent = False
-
-    def cmd(self):
-        return "./installer %s" % self.action
-
-    def as_new_mesos_task(self, agent_id):
-        task = self.new_default_task(agent_id)
-
-        # Download the installer binary
-        uri = task.command.uris.add()
-        uri.value = INSTALLER_URL
-        uri.executable = True
-        uri.cache = False
-
-        return task
-
-
-class TaskRestartComponents(Task):
-    """
-    Task to restart the following components:
-    -  Docker daemon
-    -  Mesos Agent process
-    This is a short lived task.
-    """
-    action = ACTION_RESTART
-    version = 0  # Increment if the run task needs to be re-executed in new
-                 # release
-    persistent = False
-
-    def __init__(self, **kwargs):
-        self.restart_options = kwargs.get("restart_options") or set()
-        super(TaskRestartComponents, self).__init__(**kwargs)
-
-    def to_dict(self):
-        task_dict = super(TaskRestartComponents, self).to_dict()
-        task_dict["restart_options"] = list(self.restart_options)
-        return task_dict
-
-    def cmd(self):
-        assert self.restart_options, "Restart task should not be invoked if " \
-                                     "no restarts are required"
-        return "./installer %s && echo " % self.action + " ".join(self.restart_options)
-
-    def as_new_mesos_task(self, agent_id):
-        task = self.new_default_task(agent_id)
-
-        # Download the installer binary
-        uri = task.command.uris.add()
-        uri.value = INSTALLER_URL
-        uri.executable = True
-        uri.cache = False
-
-        return task
-
-
 class TaskRunCalicoNode(Task):
     """
-    Task to run Calico node.  This is a long-running task, if the task fails
-    it will be restarted.
+    Task to run Calico node.
     """
-    action = ACTION_CALICO_NODE
-    version = 0  # Increment if the run task needs to be re-executed in new
-                 # release
+    version = 0
     persistent = True
-
-    def cmd(self):
-        return "./calicoctl node --detach=false --ip=$(./installer %s)" % ACTION_GET_AGENT_IP
+    restarts = False
+    cpus = TASK_CPUS
+    mem = TASK_MEM
+    description = "Calico: daemon"
 
     def as_new_mesos_task(self, agent_id):
         task = self.new_default_task(agent_id)
+        task.command.value = "./calicoctl node --detach=false --ip=$(./installer ip)"
+        task.command.user = "root"
+
 
         # Add a URI for downloading the calicoctl binary
         uri = task.command.uris.add()
@@ -372,33 +263,21 @@ class TaskRunCalicoNode(Task):
 
 class TaskRunCalicoLibnetwork(Task):
     """
-    Task to run an Calico libnetwork.  This is a long-running task, if the task
-    fails it will be restarted.
+    Task to run an Calico libnetwork.
     """
-    action = ACTION_CALICO_LIBNETWORK
-    version = 0  # Increment if the run task needs to be re-executed in new
-                 # release
+    version = 0
     persistent = True
+    restarts = False
+    cpus = TASK_CPUS
+    mem = TASK_MEM
+    description = "Calico: Docker networking driver"
 
     def as_new_mesos_task(self, agent_id):
         """
         Take the information stored in this Task object and fill a
         mesos task.
         """
-        task = mesos_pb2.TaskInfo()
-        task.name = repr(self)
-        task.task_id.value = self.task_id
-        task.slave_id.value = agent_id
-
-        cpus = task.resources.add()
-        cpus.name = "cpus"
-        cpus.type = mesos_pb2.Value.SCALAR
-        cpus.scalar.value = TASK_CPUS
-
-        mem = task.resources.add()
-        mem.name = "mem"
-        mem.type = mesos_pb2.Value.SCALAR
-        mem.scalar.value = TASK_MEM
+        task = self.new_default_task(agent_id)
 
         task.container.type = mesos_pb2.ContainerInfo.DOCKER
         task.container.docker.image = "calico/node-libnetwork:latest"
@@ -411,5 +290,3 @@ class TaskRunCalicoLibnetwork(Task):
         volume.host_path = "/run/docker/plugins"
 
         return task
-
-

@@ -8,13 +8,9 @@ from collections import OrderedDict
 
 import psutil
 from calico_dcos.common.constants import (LOGFILE_INSTALLER,
-    ACTION_INSTALL_NETMODULES, ACTION_CONFIGURE_DOCKER, ACTION_RESTART,
-    ACTION_CALICO_NODE, RESTART_DOCKER, RESTART_AGENT, RESTART_COMPONENTS,
-    MAX_TIME_FOR_DOCKER_RESTART, ACTION_GET_AGENT_IP,
     MESOS_MASTER_HOSTNAME, MESOS_MASTER_PORT)
-from calico_dcos.common.version import VERSION
 
-from src.calico_dcos.common.utils import setup_logging
+from calico_dcos.common.utils import setup_logging
 
 _log = setup_logging(LOGFILE_INSTALLER)
 
@@ -189,32 +185,8 @@ def output_restart_components(components):
 
 def cmd_install_netmodules():
     """
-    Install netmodules and Calico plugin.  This command does not block.
-
-    The command writes to stdout the following
-      restart-agent-yes
-      restart-agent-no
-    depending on whether a restart of the agent is required or not.
-
-    The command does the following:
-    -  Reads the /etc/calico/installer/agent-start file if it exists.  It
-       contains the start time of the agent process at the point the
-       netmodules/calico files were installed.
-       -  If the file exists and the time is different to the current time then
-          return restart-agent-no.
-       -  If the file exists and the time is the same as the current time then
-          return restart-agent-yes.
-       -  Otherwise:
-          -  Installs netmodules, the calico plugin and all necessary
-             configuration files.
-             Note: Files are modified in an order that, should the task fail
-             part way through, the agent will still be able to restart
-             successfully.
-          -  Write out the file /etc/calico/installer/agent-start containing a
-             timestamp of the agent start time.
-          -  Return restart-agent-yes
-
-    :return:
+    Install netmodules and Calico plugin.  A successful completion of the task
+    indicates successful installation.
     """
     # Load the current Calico install info for Docker, and the current Docker
     # daemon configuration.
@@ -273,58 +245,40 @@ def cmd_install_netmodules():
         mesos_props["MESOS_HOOKS"] = ["com_mesosphere_mesos_NetworkHook"]
         store_property_file(AGENT_CONFIG, mesos_props)
 
+    # If a network hook was installed, but not by Calico, exit.
     if not install_config.get("netmodules-updated"):
         _log.debug("NetworkHook not updated by Calico")
-        return None
+        return
 
+    # If we haven't stored the current agent creation time, then do so now.
+    # We use this to track when the agent has restarted with our new config.
     if not install_config.get("netmodules-created"):
-        # Mesos configuration was updated, store the current agent process
-        # ID and then indicate an agent restart is required.
-        _log.debug("Store agent creation time and indicate restart")
+        _log.debug("Store agent creation time")
         agent_process = wait_for_process(AGENT_EXE, AGENT_PARMS,
                                          MAX_TIME_FOR_AGENT_RESTART)
-        install_config["version"] = VERSION
         install_config["agent-created"] = str(agent_process.create_time())
         store_config(NETMODULES_INSTALL_CONFIG, install_config)
-        return {RESTART_AGENT}
 
-    # If we updated the agent then check the process start time to determine
-    # if we need to restart the agent.
+    # Check the agent process creation time to see if it has been restarted
+    # since the config was updated.
     _log.debug("Restart agent if not using updated config")
     agent_process = wait_for_process(AGENT_EXE, AGENT_PARMS,
-                                      MAX_TIME_FOR_AGENT_RESTART)
-    if install_config["agent-created"] == str(agent_process.create_time()):
-        return {RESTART_AGENT}
-    else:
-        return None
+                                     MAX_TIME_FOR_AGENT_RESTART)
+    if install_config["agent-created"] != str(agent_process.create_time()):
+        _log.debug("Agent was restarted since config was updated")
+        return
+
+    # The agent has not been restarted, so restart it now.  This will cause the
+    # task to fail, but when it is re-run, we will not attempt to re-start the
+    # agent, and the task will complete successfully.
+    _log.warning("Restarting agent process: %s", agent_process)
+    agent_process.kill()
 
 
 def cmd_install_docker_cluster_store():
     """
-    Install Docker configuration for Docker multi-host networking.
-    This command does not block.
-
-    The command writes to stdout the following
-      restart-docker-yes
-      restart-docker-no
-    depending on whether a restart of the docker daemon is required or not.
-
-    This command does the following:
-    -  Reads the /etc/calico/installer/docker-start file if it exists.  It
-       contains the start time of the docker daemon at the point the
-       docker config file was installed or updated.
-       -  If the file exists and the time is different to the current time then
-          return restart-docker-no.
-       -  If the file exists and the time is the same as the current time then
-          return restart-docker-yes.
-       -  Otherwise:
-          -  Update the /etc/docker/daemon.json file to include the cluster
-             store information.
-          -  Write out the file /etc/calico/installer/docker-start containing a
-             timestamp of the docker daemon start time.
-          -  Return restart-docker-yes
-
-    :return:
+    Install Docker configuration for Docker multi-host networking.  A successful
+    completion of the task indicates successful installation.
     """
     # Load the current Calico install info for Docker, and the current Docker
     # daemon configuration.
@@ -344,30 +298,31 @@ def cmd_install_docker_cluster_store():
         daemon_config["cluster-store"] = CLUSTER_STORE_ETCD_PROXY
         store_config(DOCKER_DAEMON_CONFIG, daemon_config)
 
+    # If Docker was already configured to use a cluster store, and not by
+    # Calico, exit now.
     if not install_config.get("docker-updated"):
         _log.debug("Docker not updated by Calico")
-        return None
+        return
 
+    # If Docker config was updated, store the current Docker process creation
+    # time so that we can identify when Docker is restarted.
     if not install_config.get("docker-created"):
-        # Docker configuration was updated, store the current docker process
-        # ID and then indicate a Docker restart is required.
-        _log.debug("Store docker daemon creation time and indicate restart")
+        _log.debug("Store docker daemon creation time")
         daemon_process = wait_for_process(DOCKER_EXE, DOCKER_DAEMON_PARMS,
                                           MAX_TIME_FOR_DOCKER_RESTART)
-        install_config["version"] = VERSION
         install_config["docker-created"] = str(daemon_process.create_time())
         store_config(DOCKER_INSTALL_CONFIG, install_config)
-        return {RESTART_DOCKER}
 
-    # If we updated Docker the check the process start time to determine if we
-    # need to restart docker.
+    # If Docker needs restarting, do that now.
     _log.debug("Restart docker if not using updated config")
     daemon_process = wait_for_process(DOCKER_EXE, DOCKER_DAEMON_PARMS,
                                       MAX_TIME_FOR_DOCKER_RESTART)
-    if install_config["docker-created"] == str(daemon_process.create_time()):
-        return {RESTART_DOCKER}
-    else:
-        return None
+    if install_config["docker-created"] != str(daemon_process.create_time()):
+        _log.debug("Docker daemon has been restarted")
+        return
+
+    _log.warning("Restarting Docker process: %s", daemon_process)
+    daemon_process.kill()
 
 
 def cmd_restart_components():
@@ -407,7 +362,8 @@ def cmd_get_agent_ip():
     Connects a socket to the DNS entry for mesos master and returns
     which IP address it connected via, which should be the agent's
     accessible IP.
-    :return: string representation of agent_ip
+
+    Prints the IP to stdout
     """
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -421,22 +377,17 @@ def cmd_get_agent_ip():
                    MESOS_MASTER_HOSTNAME,
                    MESOS_MASTER_PORT)
         sys.exit(1)
-
-    return agent_ip
+    print agent_ip
 
 
 if __name__ == "__main__":
     action = sys.argv[1]
-    if action == ACTION_INSTALL_NETMODULES:
-        components = cmd_install_netmodules()
-        output_restart_components(components)
-    elif action == ACTION_CONFIGURE_DOCKER:
-        components = cmd_install_docker_cluster_store()
-        output_restart_components(components)
-    elif action == ACTION_RESTART:
-        cmd_restart_components()
-    elif action == ACTION_GET_AGENT_IP:
-        print(cmd_get_agent_ip())
+    if action == "netmodules":
+        cmd_install_netmodules()
+    elif action == "docker":
+        cmd_install_docker_cluster_store()
+    elif action == "ip":
+        cmd_get_agent_ip()
     else:
         print "Unexpected action: %s" % action
         sys.exit(1)

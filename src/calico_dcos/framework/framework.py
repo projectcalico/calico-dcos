@@ -34,7 +34,7 @@ from calico_dcos.common.constants import LOGFILE_FRAMEWORK
 from kazoo.client import KazooClient, NoNodeError, NodeExistsError
 from mesos.interface import mesos_pb2
 
-from src.calico_dcos.common.utils import setup_logging
+from calico_dcos.common.utils import setup_logging
 from tasks import (Task, TaskRunEtcdProxy, TaskInstallDockerClusterStore,
                    TaskInstallNetmodules, TaskRestartComponents,
                    TaskRunCalicoNode, TaskRunCalicoLibnetwork)
@@ -59,10 +59,14 @@ _log = setup_logging(LOGFILE_FRAMEWORK)
 # -  Etcd SRV address
 # -  Etcd proxy port (maybe)
 
-TASK_CLASSES = [TaskRunEtcdProxy, TaskInstallNetmodules,
-                TaskInstallDockerClusterStore, TaskRestartComponents,
-                TaskRunCalicoNode, TaskRunCalicoLibnetwork]
-TASK_CLASSES_BY_ACTION = {cls.action: cls for cls in TASK_CLASSES}
+TASK_ORDER = [
+    TaskRunEtcdProxy,
+    TaskInstallDockerClusterStore,
+    TaskInstallNetmodules,
+    TaskRunCalicoNode,
+    TaskRunCalicoLibnetwork
+]
+TASKS_BY_CLASSNAME = {cls.__name__: cls for cls in TASK_ORDER}
 
 # The ZooKeeper Calico agent directory
 ZK_AGENT_DIR = "/calico-framework/agent"
@@ -84,8 +88,8 @@ class ZkDatastore(object):
             tasks_dict = json.loads(tasks_str)
 
         tasks = {
-            action: TASK_CLASSES_BY_ACTION[action].from_dict(task_dict)
-            for action, task_dict in tasks_dict.iteritems()
+            cn: TASKS_BY_CLASSNAME[cn].from_dict(task_dict)
+            for cn, task_dict in tasks_dict.iteritems()
         }
         return tasks
 
@@ -96,7 +100,7 @@ class ZkDatastore(object):
         :return:
         """
         tasks_dict = {
-            action: task.to_dict() for action, task in tasks.iteritems()
+            cn: task.to_dict() for cn, task in tasks.iteritems()
         }
         tasks_json = json.dumps(tasks_dict)
         try:
@@ -127,8 +131,12 @@ class Agent(object):
 
         self.tasks = {}
         """
-        Tasks for each task type (we only ever have one of each running on an
-        agent.
+        Tasks for each task type (keyed off the class name)
+        """
+
+        self.offers_suppressed = False
+        """
+        Whether offers are currently suppressed.
         """
 
     def __repr__(self):
@@ -140,7 +148,7 @@ class Agent(object):
         :param cls:
         :return: The Task, or None if the task has not been scheduled.
         """
-        return self.tasks.get(cls.action)
+        return self.tasks.get(cls.__name__)
 
     def handle_offer(self, driver, offer):
         """
@@ -148,29 +156,20 @@ class Agent(object):
         :return:  None if the offer is not accepted, otherwise return the task
                   that needs scheduling.
 
-        Installation tasks need to be performed in a particular order:
-        -  Firstly etcd-proxy needs to be running.  In parallel with this we
-           can install netmodules (with Calico plugin).
-        -  Once etcd-proxy is installed we can update the Docker configuration to
-           use etcd-proxy as its cluster store (we don't need to wait for the
-           netmodules install to complete).
-        -  If the netmodules or docker tasks indicated that a restart is
-           required then restart the appropriate componenets.  See note below.
-        -  Once Docker and Agent are restarted, we can spin up the Calico
-           node and the Calico libnetwork driver.
+        We ensure tasks are completed in a particular order:
+        -  Firstly etcd-proxy needs to be running.
+        -  Once etcd-proxy is installed we can install Docker multi-host
+           networking (this will restart Docker if necessary)
+        -  Once Docker is updated, we can install net-modules and Calico plugin
+           on the agent (this will restart the Agent if necessary)
+        -  Then Calico node and Calico libetwork driver can be started.
+
+        All failed tasks are rescheduled until:
+        -  Non-persistent tasks finish successfully
+        -  Persistent tasks are in a running state.
 
         A note on component restarts
         ============================
-
-        Whether or not we restart anything is handled by the install tasks for
-        docker multihost networking and for netmodules.  We could make the
-        restart check to see if anything needs restarting - and simply no-op if
-        nothing needs restarting.  However, since we want to limit how many
-        agents are restarting at any one time, this slows down how quickly we
-        can perform the subsequent steps.  Instead, we have the install tasks
-        indicate whether a restart is required.  If a restart is required we
-        will do the restart, otherwise we won't - thus agents that don't need a
-        restart will not get blocked behind an agent installation that does.
 
         Since we are possibly restarting docker and/or the agent, we
         need to consider what happens to these tasks when the services
@@ -178,14 +177,15 @@ class Agent(object):
 
         1) Restarting Docker may cause the framework to exit (since it is
         running as a docker container).  If that is the case the framework
-        will be restarted and will kick off the install sequence again on each
-        agent.  Once installed they will not be re-installed (and therefore
-        the systems will not be restarted).
+        will be restarted and existing tasks will be re-queried and any failed
+        persistent tasks will be restarted.  All tasks are idempotent.  Some
+        tasks restart components - they are written in such a way that won't
+        keep restarting components if it isn't necessary.
 
         2) Restarting the agent could also cause the framework to exit in which
         case the same logic applies as for a Docker restart.  Also, the task
         that the agent was running may appear as failed.  If we get a failed
-        notification from a restart task, we re-run the installation tasks.
+        task, we re-run it.
 
         In both cases, once a restart has successfully applied the new config
         the tasks ensure that we do not restart again - so we will not end up
@@ -204,64 +204,19 @@ class Agent(object):
             _log.debug("Agent has not yet sync'd")
             return None
 
-        if self.task_can_be_offered(TaskRunEtcdProxy, offer):
-            # We have no etcd task running - start one now.
-            _log.info("Install and run etcd proxy")
-            return self.new_task(TaskRunEtcdProxy)
+        # Loop through the tasks in required order.  If a task needs scheduling
+        # then schedule it if we can.  If we can't schedule the required task
+        # then exit - we will attempt to schedule next offer.
+        for task_class in TASK_ORDER:
+            if self.task_needs_scheduling(task_class):
+                if self.task_can_be_offered():
+                    return self.new_task(task_class)
+                else:
+                    return None
 
-        if self.task_can_be_offered(TaskInstallNetmodules, offer):
-            # We have not yet installed netmodules - do that now (we don't need
-            # to wait for etcd to come online).
-            _log.info("Install or check netmodules")
-            return self.new_task(TaskInstallNetmodules)
-
-        if not self.task_running(TaskRunEtcdProxy):
-            # We need to wait for the proxy to come online before continuing.
-            _log.info("Waiting for etcd proxy to be healthy")
-            return None
-
-        if self.task_can_be_offered(TaskInstallDockerClusterStore, offer):
-            # Etcd proxy is running, so lets make sure Docker is configured to
-            # use etcd as its cluster store.
-            _log.info("Install or check docker multihost networking config")
-            return self.new_task(TaskInstallDockerClusterStore)
-
-        if not self.task_finished(TaskInstallNetmodules):
-            # If we are waiting for successful completion of the netmodules
-            # install then do not continue.
-            _log.info("Waiting for netmodules installation")
-            return None
-
-        if not self.task_finished(TaskInstallDockerClusterStore):
-            # If we are waiting for successful completion of the docker multi
-            # host networking install then do not continue.
-            _log.info("Waiting for docker networking installation")
-            return None
-
-        # Determine if a restart is required.
-        # -  If a restart is required, kick off the restart task.
-        restart_options = self._task(TaskInstallNetmodules).restart_options() | \
-                          self._task(TaskInstallDockerClusterStore).restart_options()
-
-        if restart_options and \
-            self.task_can_be_offered(TaskRestartComponents, offer) and \
-            self.scheduler.can_restart_agent():
-            # We require a restart and we haven't already scheduled one.
-            _log.info("Schedule a restart task")
-            return self.new_task(TaskRestartComponents,
-                                 restart_options=restart_options)
-
-        # If necessary start Calico node and Calico libnetwork driver
-        if self.task_can_be_offered(TaskRunCalicoNode, offer):
-            # Calico node is not running, start it up.
-            _log.info("Start Calico node")
-            return self.new_task(TaskRunCalicoNode)
-
-        if self.task_can_be_offered(TaskRunCalicoLibnetwork, offer):
-            # Calico libnetwork driver is not running, start it up.
-            _log.info("Start Calico libnetwork driver")
-            return self.new_task(TaskRunCalicoLibnetwork)
-
+        _log.debug("All tasks are running, suppress offers")
+        self.offers_suppressed = True
+        self.driver.suppressOffers()
         return None
 
     def trigger_resync(self, driver):
@@ -298,7 +253,7 @@ class Agent(object):
         :return: The new task.
         """
         task = task_class(*args, **kwargs)
-        self.tasks[task.action] = task
+        self.tasks[task_class.__name__] = task
 
         # Persist these tasks to the datastore.
         if self.scheduler.zk:
@@ -309,32 +264,49 @@ class Agent(object):
     def task_can_be_offered(self, task_class, offer):
         """
         Whether a task can be included in the offer request.  A task can be
-        included when the task type needs to be scheduled (see
-        task_needs_scheduling) and the task resource requirements are fulfilled
-        by the offer.
+        included when the following conditions are met:
+         -  the task resource requirements are fulfilled by the offer
+         -  the task is either not a restart task, or we have not exceeded
+            our quota of concurrent restart tasks.
         :param task_class:
         :param offer:
         :return:
         """
-        needs_scheduling = self.task_needs_scheduling(task_class)
-        return needs_scheduling and task_class.can_accept_offer(offer)
+        return task_class.can_accept_offer(offer) and \
+               (task_class.restarts or self.scheduler.can_restart_agent())
 
     def task_needs_scheduling(self, task_class):
         """
-        Whether a task needs scheduling.  A task needs scheduling if it has not
-        yet been run, or if it has run and failed.  Whether a task has failed
-        depends on whether the task type is persistent (i.e. always supposed to
-        be running)
+        Whether a task needs scheduling.  A task needs scheduling if:
+         -  it has not yet been run
+         -  the version of the previous run is different to the version of the
+            current task
+         -  if the task failed
+         -  if the task is persistent, but the current state indicates that it
+            is not running.
+
         :param task_class:
         :return: True if the task needs scheduling.  False otherwise.
         """
         task = self._task(task_class)
         if not task:
+            _log.debug("Task '%s' has not yet been run", task_class)
             return True
-        if task.persistent:
-            return not task.running()
-        else:
-            return task.failed()
+
+        if task.version != task_class.version:
+            _log.debug("Task '%s' has been changed.  Prev=%s, Curr=%s",
+                       task_class, task.version, task_class.version)
+            return True
+
+        if task.failed():
+            _log.debug("Task '%s' failed", task_class)
+
+        if task.persistent and task.running():
+            _log.debug("Task '%s' is not running", task_class)
+            return True
+
+        _log.debug("Task '%s' does not need scheduling", task_class)
+        return False
 
     def task_running(self, task_class):
         """
@@ -364,16 +336,15 @@ class Agent(object):
         completed the sync.
         :param update:
         """
-        # Extract the task action from the update and update the appropriate
-        # task.  Updates for the restart task need special case processing
-        action = Task.action_from_task_id(update.task_id.value)
+        # Extract the task classname from the task ID and update the task.
+        classname = Task.classname_from_task_id(update.task_id.value)
 
-        # Lookup the existing task, if there is one.
-        task = self.tasks.get(action)
+        # Lookup the existing task, if there is one.  Only update if the task
+        # ID matches the one in our cache.
+        task = self.tasks.get(classname)
         if not task or task.task_id != update.task_id.value:
             _log.debug("Task is not recognised - ignoring")
             return
-
         _log.debug("TASK_UPDATE - %s: %s",
                 mesos_pb2.TaskState.Name(update.state),
                 task)
@@ -381,7 +352,8 @@ class Agent(object):
         # Update the task.
         task.update(update)
 
-        if task.failed():
+        # We expect restart tasks to fail, but not others.
+        if task.failed() and not task.restarts:
             _log.error("\t%s is in unexpected state %s with message '%s'",
                    task, mesos_pb2.TaskState.Name(update.state), update.message)
             _log.error("\tData:  %s", repr(str(update.data)))
@@ -389,14 +361,6 @@ class Agent(object):
             _log.error("\tReason: %s", mesos_pb2.TaskStatus.Reason.Name(update.reason))
             _log.error("\tMessage: %s", update.message)
             _log.error("\tHealthy: %s", update.healthy)
-
-        # An update to indicate a restart task is no longer running requires
-        # some additional processing to re-spawn the install tasks as this
-        # ensures the installation completed successfully.
-        if (action == TaskRestartComponents.action) and not task.running():
-            _log.debug("Handle update for restart task")
-            del(self.tasks[TaskInstallNetmodules.action])
-            del(self.tasks[TaskInstallDockerClusterStore.action])
 
         # Persist the updated tasks to the datastore.
         if self.scheduler.zk:
@@ -406,15 +370,18 @@ class Agent(object):
         if not self.agent_syncd and all(task.clean for task in self.tasks.values()):
             self.agent_syncd = True
 
+        # If offers were suppressed, then revive them now since something has
+        # changed.
+        if self.offers_suppressed:
+            _log.debug("Revive offers for agent")
+            driver.reviveOffers()
+
     def is_restarting(self):
         """
-        Return whether the agent is undergoing a component restart.
-        :return: True if agent is still undergoing a restart.
+        Return whether a component restart is in progress.
+        :return: True if any restart task is in progress.
         """
-        return (self._task[TaskRestartComponents] and
-                (not self.task_running(TaskRunEtcdProxy) or
-                 not self.task_finished(TaskInstallNetmodules) or
-                 not self.task_finished(TaskInstallDockerClusterStore)))
+        return any(t.restarts and not t.finished() for t in self.tasks)
 
 
 class CalicoInstallerScheduler(mesos.interface.Scheduler):
