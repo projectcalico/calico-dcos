@@ -5,12 +5,12 @@ from datetime import datetime
 
 from mesos.interface import mesos_pb2
 
-from config import config
+from config import config, USE_CACHED_INSTALLER
 
 _log = logging.getLogger(__name__)
 
 #TODO We need a better way of handling which .so we need!
-NETMODULES_SO_URL = "http://172.25.20.11/net-modules.so"
+NETMODULES_SO_URL = "http://172.25.20.11/libmesos_network_isolator.so"
 
 # Expected task CPUs and Mem usage
 TASK_CPUS = 0.1
@@ -96,8 +96,10 @@ class Task(object):
                               mesos_pb2.TASK_RUNNING)
 
     def update(self, update):
-        _log.info("Updating status of %s from %d to %d",
-                  self, self.state, update.state)
+        _log.info("Updating status of %s from %s to %s",
+                  self,
+                  mesos_pb2.TaskState.Name(self.state),
+                  mesos_pb2.TaskState.Name(update.state))
         self.updated = str(datetime.utcnow())
         self.state = update.state
         self.clean = True
@@ -218,7 +220,7 @@ class TaskInstallDockerClusterStore(Task):
         uri = task.command.uris.add()
         uri.value = config.installer_url
         uri.executable = True
-        uri.cache = False
+        uri.cache = USE_CACHED_INSTALLER
         return task
 
     @classmethod
@@ -252,6 +254,19 @@ class TaskInstallNetmodules(Task):
         uri.value = NETMODULES_SO_URL
         uri.executable = True
         uri.cache = True
+
+        # Download calico_mesos
+        uri = task.command.uris.add()
+        uri.value = config.calico_mesos_url
+        uri.executable = True
+        uri.cache = True
+
+        # Download the installer binary
+        uri = task.command.uris.add()
+        uri.value = config.installer_url
+        uri.executable = True
+        uri.cache = USE_CACHED_INSTALLER
+
         return task
 
     @classmethod
@@ -276,8 +291,7 @@ class TaskRunCalicoNode(Task):
     description = "Calico: daemon"
 
     def as_new_mesos_task(self, agent_id):
-        cmd_ip = "$(./installer ip %s %s)" % (config.master_host,
-                                              config.master_port)
+        cmd_ip = "$(./installer ip %s)" % (config.mesos_master)
         task = self.new_default_task(agent_id)
         task.command.value = "./calicoctl node --detach=false --ip=" + cmd_ip
         task.command.user = "root"
@@ -293,7 +307,7 @@ class TaskRunCalicoNode(Task):
         uri = task.command.uris.add()
         uri.value = config.installer_url
         uri.executable = True
-        uri.cache = True
+        uri.cache = USE_CACHED_INSTALLER
 
         return task
 

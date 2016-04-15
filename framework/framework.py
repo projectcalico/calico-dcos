@@ -181,7 +181,7 @@ class Agent(object):
         the tasks ensure that we do not restart again - so we will not end up
         in a restart loop.
         """
-        _log.debug("Handling offer")
+        _log.debug("Handling offer from agent %s", offer.slave_id.value[-8:])
 
         if self.agent_syncd is None:
             # A resync has not been initiated.  Trigger a resync.
@@ -200,7 +200,7 @@ class Agent(object):
         for task_class in TASK_ORDER:
             _log.debug("Handling task: '%s'", task_class.__name__)
             if not task_class.allowed():
-                _log.debug("Task is not allowed - skip")
+                _log.debug("Task is not allowed - skipping")
 
             if self.task_needs_scheduling(task_class):
                 _log.debug("Task needs scheduling")
@@ -239,7 +239,8 @@ class Agent(object):
             return
 
         # Start the resync and indicate that it is not yet complete.
-        driver.reconcileTasks(task_statuses)
+        _log.debug("Triggering a reconcile.")
+        driver.reconcileTasks([])
         self.agent_syncd = False
 
     def new_task(self, task_class, *args, **kwargs):
@@ -288,19 +289,20 @@ class Agent(object):
         """
         task = self._task(task_class)
         if not task:
-            _log.debug("Task '%s' has not yet been run", task_class)
+            _log.debug("Schedule task: Task '%s' has not run yet.", task_class)
             return True
 
         if task.hash != task_class.hash:
-            _log.debug("Task '%s' has been changed.  Prev=%s, Curr=%s",
+            _log.debug("Schedule task: Task '%s' has been changed.  Prev=%s, Curr=%s",
                        task_class, task.hash, task_class.hash)
             return True
 
         if task.failed():
-            _log.debug("Task '%s' failed", task_class)
+            _log.debug("Schedule task: Task '%s' is in a failed state.", task_class)
+            return True
 
-        if task.persistent and task.running():
-            _log.debug("Task '%s' is not running", task_class)
+        if task.persistent and not task.running():
+            _log.debug("Schedule task: Task '%s' is persistent but is not currently running.", task_class)
             return True
 
         _log.debug("Task '%s' does not need scheduling", task_class)
@@ -342,11 +344,16 @@ class Agent(object):
         # ID matches the one in our cache.
         task = self.tasks.get(classname)
         if not task or task.task_id != update.task_id.value:
-            _log.debug("Task is not recognised - ignoring")
+            if update.state == mesos_pb2.TASK_RUNNING:
+                _log.debug("Killing unrecognized task: %s" % update.task_id.value)
+                driver.killTask(update.task_id)
+            else:
+                _log.debug("Ignoring update from unrecognized stopped task.")
             return
-        _log.debug("TASK_UPDATE - %s: %s",
+        _log.debug("TASK_UPDATE - %s: %s on Slave %s",
                    mesos_pb2.TaskState.Name(update.state),
-                   task)
+                   task,
+                   update.slave_id.value[-7:])
 
         # Update the task.
         task.update(update)
@@ -355,11 +362,11 @@ class Agent(object):
         if task.failed() and not task.restarts:
             _log.error("\t%s is in unexpected state %s with message '%s'",
                    task, mesos_pb2.TaskState.Name(update.state), update.message)
-            _log.error("\tData:  %s", repr(str(update.data)))
-            _log.error("\tSent by: %s", mesos_pb2.TaskStatus.Source.Name(update.source))
-            _log.error("\tReason: %s", mesos_pb2.TaskStatus.Reason.Name(update.reason))
-            _log.error("\tMessage: %s", update.message)
-            _log.error("\tHealthy: %s", update.healthy)
+            _log.debug("\tData:  %s", repr(str(update.data)))
+            _log.debug("\tSent by: %s", mesos_pb2.TaskStatus.Source.Name(update.source))
+            _log.debug("\tReason: %s", mesos_pb2.TaskStatus.Reason.Name(update.reason))
+            _log.debug("\tMessage: %s", update.message)
+            _log.debug("\tHealthy: %s", update.healthy)
 
         # Persist the updated tasks to the datastore.
         if self.scheduler.zk:
@@ -485,8 +492,7 @@ def launch_framework():
     :return: The Mesos driver.  The caller should call driver.join() to ensure
     thread is blocked until driver exits.
     """
-    master_addr = "{}:{}".format(config.master_ip, config.master_port)
-    _log.info("Connecting to Master: %s", master_addr)
+    _log.info("Connecting to Master: %s", config.mesos_master)
     framework = mesos_pb2.FrameworkInfo()
     framework.user = "root"
     framework.name = "Calico framework"
@@ -498,7 +504,7 @@ def launch_framework():
     scheduler = CalicoInstallerScheduler()
     driver = mesos.native.MesosSchedulerDriver(scheduler,
                                                framework,
-                                               master_addr)
+                                               config.mesos_master)
     driver.start()
     return driver
 
@@ -515,6 +521,10 @@ def initialise_logging():
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+
+    # Kazoo zk client dumpts lots of messages about raw data sent and received
+    # from zk. Lower logging to info to surpress the DEBUG info.
+    logging.getLogger('kazoo.client').setLevel(logging.INFO)
 
 
 if __name__ == "__main__":

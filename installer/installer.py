@@ -22,7 +22,7 @@ DOCKER_DAEMON_EXE_RE = re.compile("/usr/bin/docker\s+daemon\s+.*")
 DOCKER_DAEMON_CONFIG = "/etc/docker/daemon.json"
 
 # Docker information for a standard Docker install.
-AGENT_EXE_RE = re.compile("/opt/mesosphere.*/bin/mesos-slave\s.*")
+AGENT_EXE_RE = re.compile("/opt/mesosphere.*/bin/mesos-slave.*")
 AGENT_CONFIG = "/opt/mesosphere/etc/mesos-slave-common"
 AGENT_MODULES_CONFIG = "/opt/mesosphere/etc/mesos-slave-modules.json"
 
@@ -138,7 +138,7 @@ def store_config(filename, config):
     :param config:  The config (a simple dictionary)
     """
     ensure_dir(os.path.dirname(filename))
-    atomic_write(json.dumps(config))
+    atomic_write(filename, json.dumps(config))
 
 
 def load_property_file(filename):
@@ -218,7 +218,7 @@ def cmd_install_netmodules():
 
     libraries = modules_config.setdefault("libraries", [])
     files = [library.get("file") for library in libraries]
-    if "/opt/mesosphere/lib/libmesos_network_isolator.so" not in files:
+    if "/opt/mesosphere/lib/mesos/libmesos_network_isolator.so" not in files:
         # Flag that modules need to be updated and reset the agent create
         # time to ensure we restart the agent.
         _log.debug("Configure netmodules and calico in Mesos")
@@ -238,7 +238,7 @@ def cmd_install_netmodules():
 
         # Update the modules config to reference the .so
         new_library = {
-          "file": "/opt/mesosphere/lib/libmesos_network_isolator.so",
+          "file": "/opt/mesosphere/lib/mesos/libmesos_network_isolator.so",
           "modules": [
             {
               "name": "com_mesosphere_mesos_NetworkIsolator",
@@ -273,7 +273,7 @@ def cmd_install_netmodules():
 
         # Finally update the properties.  We do this last, because this is what
         # we check to see if files are copied into place.
-        isolation.append("com_mesosphere_mesos_NetworkHook")
+        isolation.append("com_mesosphere_mesos_NetworkIsolator")
         hooks.append("com_mesosphere_mesos_NetworkHook")
         store_property_file(AGENT_CONFIG, mesos_props)
 
@@ -374,8 +374,9 @@ def cmd_get_agent_ip():
     Prints the IP to stdout
     """
     # IP and port are supplied as arguments
-    host = sys.argv[2]
-    port = sys.argv[3]
+    # _log.debug("Arguments: %s", sys.argv)
+    host, port = sys.argv[2].split(":")
+    port = int(port)
 
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
