@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import sys
@@ -17,14 +18,12 @@ NETMODULES_INSTALL_CONFIG= INSTALLER_CONFIG_DIR + "/netmodules"
 DOCKER_INSTALL_CONFIG = INSTALLER_CONFIG_DIR + "/docker"
 
 # Docker information for a standard Docker install.
-DOCKER_EXE = "/usr/bin/docker"
-DOCKER_DAEMON_PARMS = ["daemon"]
+DOCKER_DAEMON_EXE_RE = re.compile("/usr/bin/docker\s+daemon\s+.*")
 DOCKER_DAEMON_CONFIG = "/etc/docker/daemon.json"
 
 # Docker information for a standard Docker install.
+AGENT_EXE_RE = re.compile("/opt/mesosphere.*/bin/mesos-slave\s.*")
 AGENT_CONFIG = "/opt/mesosphere/etc/mesos-slave-common"
-AGENT_EXE = "/usr/bin/docker"
-AGENT_PARMS = ["daemon"]
 AGENT_MODULES_CONFIG = "/opt/mesosphere/etc/mesos-slave-modules.json"
 
 # Fixed address for our etcd proxy.
@@ -33,6 +32,9 @@ CLUSTER_STORE_ETCD_PROXY = "etcd://127.0.0.1:2379"
 # Max time for process restarts (in seconds)
 MAX_TIME_FOR_DOCKER_RESTART = 30
 MAX_TIME_FOR_AGENT_RESTART = 30
+
+# Time to wait to check that a process is stable.
+PROCESS_STABILITY_TIME = 5
 
 
 def ensure_dir(directory):
@@ -44,47 +46,67 @@ def ensure_dir(directory):
         os.makedirs(directory)
 
 
-def find_process(exe, parms):
+def find_process(exe_re):
     """
     Find the unique process specified by the executable and command line
     regexes.
 
-    :param exe:
-    :param parms:
-    :return:
+    :param exe_re: Regex used to search for a particular executable in the
+    process list.  The exe regex is compared against the full command line
+    invocation - so executable plus arguments.
+    :return: The matching process, or None if no process is found.  If
+    multiple matching processes are found, this indicates an error with the
+    regex, and the script will terminate.
     """
     processes = [
         p for p in psutil.process_iter()
-        if p.exe() == exe and all(parm in p.cmdline() for parm in parms)
+        if exe_re.match(" ".join(p.cmdline()))
     ]
 
     # Multiple processes suggests our query is not correct.
     if len(processes) > 1:
-        _log.error("Found multiple matching processes: %s", exe)
+        _log.error("Found multiple matching processes: %s", exe_re)
         sys.exit(1)
 
-    return processes[0]
+    return processes[0] if processes else None
 
 
-def wait_for_process(exe, parms, max_wait):
+def wait_for_process(exe_re, max_wait, stability_time=0):
     """
     Locate the specified process, waiting a specified max time before giving
     up.  If the process can not be found within the time limit, the script
     exits.
-    :param exe:
-    :param parms:
-    :param max_wait:
-    :return:  The located process.
+    :param exe_re: Regex used to search for a particular executable in the
+    process list.  The exe regex is compared against the full command line
+    invocation - so executable plus arguments.
+    :param max_wait:  The maximum time to wait for the process to appear.
+    :param stability_time:  The time to wait to check for process stability.
+    :return: The matching process, or None if no process is found.  If
+    multiple matching processes are found, this indicates an error with the
+    regex, and the script will terminate.  If no processes are found, this
+    also indicates a problem and the script terminates.
     """
     start = time.time()
-    process = find_process(exe, parms)
+    process = find_process(exe_re)
     while not process and time.time() < start + max_wait:
         time.sleep(1)
-        process = find_process(exe, parms)
+        process = find_process(exe_re)
 
     if not process:
-        _log.error("Process not found within timeout: %s", exe)
+        _log.error("Process not found within timeout: %s", exe_re)
         sys.exit(1)
+
+    if stability_time:
+        _log.debug("Waiting to check process stability")
+        time.sleep(stability_time)
+        new_process = find_process(exe_re)
+        if not new_process:
+            _log.error("Process terminated unexpectedly: %s", process)
+            sys.exit(1)
+        if process.pid != new_process.pid:
+            _log.error("Process restarting unexpectedly: %s -> %s",
+                       process, new_process)
+            sys.exit(1)
 
     return process
 
@@ -96,10 +118,15 @@ def load_config(filename):
     :return:  A dictionary containing the JSON data.  If the file was not found
     an empty dictionary is returned.
     """
-    if not os.path.exists(filename):
-        return {}
-    with open(filename) as f:
-        return json.loads(f.read())
+    if os.path.exists(filename):
+        _log.debug("Reading config file: %s", filename)
+        with open(filename) as f:
+            config = json.loads(f.read())
+    else:
+        _log.debug("Config file does not exist: %s", filename)
+        config = {}
+    _log.debug("Returning config:\n%s", config)
+    return config
 
 
 def store_config(filename, config):
@@ -129,7 +156,8 @@ def load_property_file(filename):
             line = line.strip().split("=", 1)
             if len(line) != 2:
                 continue
-            props[line[0].strip()] = line[2].split(",")
+            props[line[0].strip()] = line[1].split(",")
+    _log.debug("Read property file:\n%s", props)
     return props
 
 
@@ -161,17 +189,19 @@ def atomic_write(filename, contents):
     os.rename(tmp, filename)
 
 
-def copy_file(from_file, to_file):
+def move_file_if_missing(from_file, to_file):
     """
-    Checks if the file exists and if not moves it into place.
+    Checks if the destination file exists and if not moves it into place.
     :param from_file:
     :param to_file:
     :return: Whether the file was moved.
     """
+    _log.debug("Move file from %s to %s", from_file, to_file)
     if os.path.exists(to_file):
+        _log.debug("File %s already exists, not copying", to_file)
         return False
     ensure_dir(os.path.dirname(to_file))
-    shutil.copy(from_file, to_file)
+    os.rename(from_file, to_file)
     return True
 
 
@@ -186,7 +216,7 @@ def cmd_install_netmodules():
     modules_config = load_config(AGENT_MODULES_CONFIG)
     mesos_props = load_property_file(AGENT_CONFIG)
 
-    libraries = modules_config.get("libraries", [])
+    libraries = modules_config.setdefault("libraries", [])
     files = [library.get("file") for library in libraries]
     if "/opt/mesosphere/lib/libmesos_network_isolator.so" not in files:
         # Flag that modules need to be updated and reset the agent create
@@ -197,10 +227,14 @@ def cmd_install_netmodules():
         store_config(NETMODULES_INSTALL_CONFIG, install_config)
 
         # Copy the netmodules .so and the calico binary.
-        copy_file("./libmesos_network_isolator.so",
-                  "/opt/mesosphere/lib/mesos/libmesos_network_isolator.so")
-        copy_file("./calico_mesos",
-                  "/calico/calico_mesos")
+        move_file_if_missing(
+            "./libmesos_network_isolator.so",
+            "/opt/mesosphere/lib/mesos/libmesos_network_isolator.so"
+        )
+        move_file_if_missing(
+            "./calico_mesos",
+            "/calico/calico_mesos"
+        )
 
         # Update the modules config to reference the .so
         new_library = {
@@ -224,10 +258,11 @@ def cmd_install_netmodules():
             }
           ]
         }
-        modules_config.setdefault("libraries", []).append(new_library)
+        libraries.append(new_library)
         store_config(AGENT_MODULES_CONFIG, modules_config)
 
-    hooks = mesos_props.get("MESOS_HOOKS", [])
+    hooks = mesos_props.setdefault("MESOS_HOOKS", [])
+    isolation = mesos_props.setdefault("MESOS_ISOLATION", [])
     if "com_mesosphere_mesos_NetworkHook" not in hooks:
         # Flag that properties need to be updated and reset the agent create
         # time to ensure we restart the agent.
@@ -238,8 +273,8 @@ def cmd_install_netmodules():
 
         # Finally update the properties.  We do this last, because this is what
         # we check to see if files are copied into place.
-        mesos_props["MESOS_ISOLATION"].append("com_mesosphere_mesos_NetworkHook")
-        mesos_props["MESOS_HOOKS"] = ["com_mesosphere_mesos_NetworkHook"]
+        isolation.append("com_mesosphere_mesos_NetworkHook")
+        hooks.append("com_mesosphere_mesos_NetworkHook")
         store_property_file(AGENT_CONFIG, mesos_props)
 
     # If nothing was updated then exit.
@@ -252,7 +287,7 @@ def cmd_install_netmodules():
     # We use this to track when the agent has restarted with our new config.
     if not install_config.get("agent-created"):
         _log.debug("Store agent creation time")
-        agent_process = wait_for_process(AGENT_EXE, AGENT_PARMS,
+        agent_process = wait_for_process(AGENT_EXE_RE,
                                          MAX_TIME_FOR_AGENT_RESTART)
         install_config["agent-created"] = str(agent_process.create_time())
         store_config(NETMODULES_INSTALL_CONFIG, install_config)
@@ -260,17 +295,19 @@ def cmd_install_netmodules():
     # Check the agent process creation time to see if it has been restarted
     # since the config was updated.
     _log.debug("Restart agent if not using updated config")
-    agent_process = wait_for_process(AGENT_EXE, AGENT_PARMS,
-                                     MAX_TIME_FOR_AGENT_RESTART)
-    if install_config["agent-created"] != str(agent_process.create_time()):
-        _log.debug("Agent was restarted since config was updated")
-        return
+    agent_process = wait_for_process(AGENT_EXE_RE,
+                                     MAX_TIME_FOR_AGENT_RESTART,
+                                     PROCESS_STABILITY_TIME)
+    if install_config["agent-created"] == str(agent_process.create_time()):
+        # The agent has not been restarted, so restart it now.  This will cause
+        # the task to fail (but sys.exit(1) to make sure).  The task will be
+        # relaunched, and next time will miss this branch and succeed.
+        _log.warning("Restarting agent process: %s", agent_process)
+        agent_process.kill()
+        sys.exit(1)
 
-    # The agent has not been restarted, so restart it now.  This will cause the
-    # task to fail, but when it is re-run, we will not attempt to re-start the
-    # agent, and the task will complete successfully.
-    _log.warning("Restarting agent process: %s", agent_process)
-    agent_process.kill()
+    _log.debug("Agent was restarted and is stable since config was updated")
+    return
 
 
 def cmd_install_docker_cluster_store():
@@ -306,21 +343,26 @@ def cmd_install_docker_cluster_store():
     # time so that we can identify when Docker is restarted.
     if not install_config.get("docker-created"):
         _log.debug("Store docker daemon creation time")
-        daemon_process = wait_for_process(DOCKER_EXE, DOCKER_DAEMON_PARMS,
+        daemon_process = wait_for_process(DOCKER_DAEMON_EXE_RE,
                                           MAX_TIME_FOR_DOCKER_RESTART)
         install_config["docker-created"] = str(daemon_process.create_time())
         store_config(DOCKER_INSTALL_CONFIG, install_config)
 
     # If Docker needs restarting, do that now.
     _log.debug("Restart docker if not using updated config")
-    daemon_process = wait_for_process(DOCKER_EXE, DOCKER_DAEMON_PARMS,
-                                      MAX_TIME_FOR_DOCKER_RESTART)
-    if install_config["docker-created"] != str(daemon_process.create_time()):
-        _log.debug("Docker daemon has been restarted")
-        return
+    daemon_process = wait_for_process(DOCKER_DAEMON_EXE_RE,
+                                      MAX_TIME_FOR_DOCKER_RESTART,
+                                      PROCESS_STABILITY_TIME)
+    if install_config["docker-created"] == str(daemon_process.create_time()):
+        # Docker has not been restarted, so restart it now.  This will cause
+        # the task to fail (but sys.exit(1) to make sure).  The task will be
+        # relaunched, and next time will miss this branch and succeed.
+        _log.warning("Restarting Docker process: %s", daemon_process)
+        daemon_process.kill()
+        sys.exit(1)
 
-    _log.warning("Restarting Docker process: %s", daemon_process)
-    daemon_process.kill()
+    _log.debug("Docker was restarted and is stable since adding cluster store")
+    return
 
 
 def cmd_get_agent_ip():
@@ -341,14 +383,27 @@ def cmd_get_agent_ip():
         our_ip = s.getsockname()[0]
         s.close()
     except socket.gaierror:
-        # Return an error signal to kill the task, so the process
-        # doesn't continue on to launch calicoctl
         _log.error("Unable to connect to master at: %s:%d", host, port)
         sys.exit(1)
     print our_ip
 
 
+def initialise_logging():
+    """
+    Initialise logging to stdout.
+    """
+    logger = logging.getLogger('')
+    logger.setLevel(logging.DEBUG)
+    formatter = logging.Formatter(
+                '%(asctime)s [%(levelname)s]\t%(name)s %(lineno)d: %(message)s')
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+
 if __name__ == "__main__":
+    initialise_logging()
     action = sys.argv[1]
     if action == "netmodules":
         cmd_install_netmodules()
@@ -359,7 +414,5 @@ if __name__ == "__main__":
     else:
         print "Unexpected action: %s" % action
         sys.exit(1)
-    # TODO: fix logging so that this doesn't get sent to installer's stdout
-    # _log.info("Completed")
     sys.exit(0)
 

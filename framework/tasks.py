@@ -175,8 +175,8 @@ class TaskRunEtcdProxy(Task):
     description = "Calico: etcd proxy"
 
     def as_new_mesos_task(self, agent_id):
-        etcd_download = config.etcd_binary_url.rsplit("/", 1)
-        if etcd_download[-1].endswith(".tar.gz"):
+        etcd_download = config.etcd_binary_url.rsplit("/", 1)[-1]
+        if etcd_download.endswith(".tar.gz"):
             etcd_img = "./%s/etcd" % etcd_download[:-7]
         else:
             etcd_img = "./%s" % etcd_download
@@ -184,8 +184,8 @@ class TaskRunEtcdProxy(Task):
         task = self.new_default_task(agent_id)
         task.container.type = mesos_pb2.ContainerInfo.MESOS
         task.command.value = etcd_img + \
-                             " --proxy=on " + \
-                             "--discovery-srv=" + config.etcd_service
+                             " --proxy=on" + \
+                             " --discovery-srv=" + config.etcd_service
         task.command.user = "root"
 
         # Download etcd binary

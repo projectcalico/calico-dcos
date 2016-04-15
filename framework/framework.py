@@ -43,16 +43,10 @@ _log = logging.getLogger(__name__)
 
 # TODO
 # o  Need to check CPU/Mem for each calico task
-# o  Check that a task can reboot the agent (quick test to make sure this will fly)
 # o  Can we determine what slave the framework is running on?  That would help limit the issues
 #    caused by restart - worst case scenario is we keep restarting the node that runs the framework...
 #    kill one agent, framework moves to another, then we next that agent...and so on.  Shouldn't actually
 #    matter, but it would slow things down.
-
-# Need the following input parms:
-# -  Number of agents that can be restarted at once
-# -  Etcd SRV address
-# -  Etcd proxy port (maybe)
 
 TASK_ORDER = [
     TaskRunEtcdProxy,
@@ -392,7 +386,6 @@ class Agent(object):
 
 
 class CalicoInstallerScheduler(mesos.interface.Scheduler):
-    max_num_concurrent_restart = 2
     def __init__(self):
         self.agents = {}
         self.zk = ZkDatastore(config.zk_persist_url)
@@ -409,7 +402,7 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         """
         num_restarting = sum(1 for a in self.agents.values() if a.is_restarting()
                                if a != agent)
-        return num_restarting < self.max_num_concurrent_restart
+        return num_restarting < config.max_concurrent_restarts
 
     def get_agent(self, agent_id):
         """
@@ -495,7 +488,7 @@ def launch_framework():
     master_addr = "{}:{}".format(config.master_ip, config.master_port)
     _log.info("Connecting to Master: %s", master_addr)
     framework = mesos_pb2.FrameworkInfo()
-    framework.user = "root"  # Have Mesos fill in the current user.
+    framework.user = "root"
     framework.name = "Calico framework"
     framework.principal = "calico-framework"
     framework.id.value = "calico-framework"
@@ -510,16 +503,22 @@ def launch_framework():
     return driver
 
 
-if __name__ == "__main__":
-    _log.setLevel(logging.DEBUG)
+def initialise_logging():
+    """
+    Initialise logging to stdout.
+    """
+    logger = logging.getLogger('')
+    logger.setLevel(logging.DEBUG)
     formatter = logging.Formatter(
                 '%(asctime)s [%(levelname)s]\t%(name)s %(lineno)d: %(message)s')
-
-    # Create Console Logger
     handler = logging.StreamHandler()
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(formatter)
-    _log.addHandler(handler)
+    logger.addHandler(handler)
+
+
+if __name__ == "__main__":
+    initialise_logging()
     fdriver = launch_framework()
     fdriver.join()
     fdriver.join()
