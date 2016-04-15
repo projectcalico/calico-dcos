@@ -57,21 +57,32 @@ TASK_ORDER = [
 ]
 TASKS_BY_CLASSNAME = {cls.__name__: cls for cls in TASK_ORDER}
 
-# The ZooKeeper Calico agent directory
-ZK_AGENT_DIR = "/calico-framework/agent"
-
 
 class ZkDatastore(object):
-    def __init__(self, url):
-        self.url = url
+    def __init__(self):
         self.zk_prefix = "root"
-        self._zk = KazooClient(hosts=url)
+        self._zk = KazooClient(hosts=config.zk_hosts)
         self._zk.start()
-        self._zk.ensure_path(ZK_AGENT_DIR)
+        self._zk.ensure_path(self.agents_dir())
+
+    def agents_dir(self):
+        """
+        Return the directory which we store agents information in.
+        :return: Agents directory.
+        """
+        return config.zk_persist_dir + "/agent"
+
+    def agent_path(self, agent_id):
+        """
+        Return the path for storing agent configuration.
+        :param agent_id:  The agent ID
+        :return:  The agent specific path.
+        """
+        return config.zk_persist_dir + "/agent/" + agent_id
 
     def load_tasks(self, agent_id):
         try:
-            tasks_str, _stat = self._zk.get("%s/%s" % (ZK_AGENT_DIR, agent_id))
+            tasks_str, _stat = self._zk.get(self.agent_path(agent_id))
         except NoNodeError:
             tasks_dict = {}
         else:
@@ -94,9 +105,9 @@ class ZkDatastore(object):
         }
         tasks_json = json.dumps(tasks_dict)
         try:
-            self._zk.create("%s/%s" % (ZK_AGENT_DIR, agent_id), tasks_json)
+            self._zk.create(self.agent_path(agent_id), tasks_json)
         except NodeExistsError:
-            self._zk.set("%s/%s" % (ZK_AGENT_DIR, agent_id), tasks_json)
+            self._zk.set(self.agent_path(agent_id), tasks_json)
 
 
 class Agent(object):
@@ -233,15 +244,20 @@ class Agent(object):
         self.tasks = self.scheduler.zk.load_tasks(self.agent_id)
         task_statuses = [task.get_task_status(self)
                          for task in self.tasks.itervalues() if task.running()]
+
         if not task_statuses:
+            # No tasks stored.  Although we can assume we are sync'd, we still
+            # perform a full reconcile so that we can terminate any old tasks
+            # that the framework may own as they may otherwise prevent the new
+            # tasks from operating correctly.
             _log.info("No running tasks, assume sync'd")
             self.agent_syncd = True
-            return
-
-        # Start the resync and indicate that it is not yet complete.
-        _log.debug("Triggering a reconcile.")
-        driver.reconcileTasks([])
-        self.agent_syncd = False
+            driver.reconcileTasks([])
+        else:
+            # Start the resync and indicate that it is not yet complete.
+            _log.debug("Triggering a reconcile.")
+            self.agent_syncd = False
+            driver.reconcileTasks(task_statuses)
 
     def new_task(self, task_class, *args, **kwargs):
         """
@@ -374,7 +390,10 @@ class Agent(object):
 
         # If we were resyncing then check if all of our tasks are now syncd.
         if not self.agent_syncd and all(task.clean for task in self.tasks.values()):
+            _log.debug("Agent is now sync'd - perform full reconcile to tidy "
+                       "up old tasks")
             self.agent_syncd = True
+            driver.reconcileTasks([])
 
         # If offers were suppressed, then revive them now since something has
         # changed.
@@ -389,13 +408,15 @@ class Agent(object):
         progress when a restart task is not finished.
         :return: True if any restart task is in progress.
         """
-        return any(t.restarts and not t.finished() for t in self.tasks.values())
+        restarting = any(t.restarts and not t.finished() for t in self.tasks.values())
+        _log.debug("Agent %s is restarting: %s", self.agent_id, restarting)
+        return restarting
 
 
 class CalicoInstallerScheduler(mesos.interface.Scheduler):
     def __init__(self):
         self.agents = {}
-        self.zk = ZkDatastore(config.zk_persist_url)
+        self.zk = ZkDatastore()
 
     def can_restart_agent(self, agent):
         """
@@ -522,8 +543,7 @@ def initialise_logging():
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-    # Kazoo zk client dumpts lots of messages about raw data sent and received
-    # from zk. Lower logging to info to surpress the DEBUG info.
+    # Reduce the kazoo logging as it is somewhat chatty.
     logging.getLogger('kazoo.client').setLevel(logging.INFO)
 
 

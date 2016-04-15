@@ -172,8 +172,8 @@ class TaskRunEtcdProxy(Task):
     hash = hashlib.sha256(config.etcd_binary_url).hexdigest()
     persistent = True
     restarts = False
-    cpus = TASK_CPUS
-    mem = TASK_MEM
+    cpus = config.cpu_limit_etcd_proxy
+    mem = config.mem_limit_etcd_proxy
     description = "Calico: etcd proxy"
 
     def as_new_mesos_task(self, agent_id):
@@ -207,8 +207,8 @@ class TaskInstallDockerClusterStore(Task):
     hash = 0
     persistent = False
     restarts = True
-    cpus = TASK_CPUS
-    mem = TASK_MEM
+    cpus = config.cpu_limit_install
+    mem = config.mem_limit_install
     description = "Calico: install Docker multi-host networking"
 
     def as_new_mesos_task(self, agent_id):
@@ -240,8 +240,8 @@ class TaskInstallNetmodules(Task):
     hash = 0
     persistent = False
     restarts = True
-    cpus = TASK_CPUS
-    mem = TASK_MEM
+    cpus = config.cpu_limit_install
+    mem = config.mem_limit_install
     description = "Calico: install netmodules and plugin"
 
     def as_new_mesos_task(self, agent_id):
@@ -286,12 +286,12 @@ class TaskRunCalicoNode(Task):
     hash = hashlib.sha256(config.calicoctl_url).hexdigest()
     persistent = True
     restarts = False
-    cpus = TASK_CPUS
-    mem = TASK_MEM
+    cpus = config.cpu_limit_node
+    mem = config.mem_limit_node
     description = "Calico: daemon"
 
     def as_new_mesos_task(self, agent_id):
-        cmd_ip = "$(./installer ip %s)" % (config.mesos_master)
+        cmd_ip = "$(./installer ip %s)" % config.zk_hosts
         task = self.new_default_task(agent_id)
         task.command.value = "./calicoctl node --detach=false --ip=" + cmd_ip
         task.command.user = "root"
@@ -318,8 +318,8 @@ class TaskRunCalicoLibnetwork(Task):
     """
     persistent = True
     restarts = False
-    cpus = TASK_CPUS
-    mem = TASK_MEM
+    cpus = config.cpu_limit_libnetwork
+    mem = config.mem_limit_libnetwork
     description = "Calico: Docker networking driver"
     hash = hashlib.sha256(config.libnetwork_img).hexdigest()
 

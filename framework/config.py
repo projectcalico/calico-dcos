@@ -1,41 +1,59 @@
 import logging
 import os
+import sys
 
 _log = logging.getLogger(__name__)
 
-ETCD_BINARY_URL = "https://github.com/coreos/etcd/releases/download/v2.3.1/etcd-v2.3.1-linux-amd64.tar.gz"
-ETCD_DISCOVERY = "etcd.mesos"
-CALICOCTL_URL = "https://github.com/projectcalico/calico-containers/releases/download/v0.18.0/calicoctl"
-CALICO_MESOS_URL = "https://github.com/projectcalico/calico-mesos/releases/download/v0.1.5/calico_mesos"
-CALICO_NODE_IMG = ""
-CALICO_LIBNETWORK_IMG = "calico/node-libnetwork:latest"
-MESOS_MASTER = "master.mesos:5050"
-CALICO_INSTALLER_URL = "http://172.25.20.11/installer"
+
+class Config(object):
+    def __init__(self):
+        self._missing = []
+        self.calicoctl_url = self.getenv("CALICO_CALICOCTL_URL")
+        self.node_img = self.getenv("CALICO_NODE_IMG")
+        self.libnetwork_img = self.getenv("CALICO_LIBNETWORK_IMG")
+        self.allow_docker_update = self.getenv("CALICO_ALLOW_DOCKER_UPDATE")
+        self.allow_agent_update = self.getenv("CALICO_ALLOW_AGENT_UPDATE")
+        self.max_concurrent_restarts = self.getenv("CALICO_MAX_CONCURRENT_RESTARTS")
+        self.zk_persist_url = self.getenv("ZK")
+        self.cpu_limit_install = self.getenv("CALICO_CPU_LIMIT_INSTALL")
+        self.mem_limit_install = self.getenv("CALICO_MEM_LIMIT_INSTALL")
+        self.cpu_limit_etcd_proxy = self.getenv("CALICO_CPU_LIMIT_ETCD_PROXY")
+        self.mem_limit_etcd_proxy = self.getenv("CALICO_MEM_LIMIT_ETCD_PROXY")
+        self.cpu_limit_node = self.getenv("CALICO_CPU_LIMIT_NODE")
+        self.mem_limit_node = self.getenv("CALICO_MEM_LIMIT_NODE")
+        self.cpu_limit_libnetwork = self.getenv("CALICO_CPU_LIMIT_LIBNETWORK")
+        self.mem_limit_libnetwork = self.getenv("CALICO_MEM_LIMIT_LIBNETWORK")
+        self.installer_url = self.getenv("CALICO_INSTALLER_URL")
+        self.calico_mesos_url = self.getenv("CALICO_MESOS_PLUGIN")
+
+        self.etcd_binary_url = self.getenv("ETCD_BINARY_URL")
+        self.etcd_discovery = self.getenv("ETCD_SRV")
+
+        self.mesos_master = self.getenv("MESOS_MASTER")
+
+        # The zk persist URL should be of the form:
+        # zk://<host1:port1>,<host2:port2>.../directory/to/story/config
+        assert self.zk_persist_url.startswith("zk://")
+        self.zk_hosts, self.zk_persist_dir = self.zk_persist_url[5:].split("/", 1)
+
+        # If we are missing environment variables, trace them out now.
+        if self._missing:
+            _log.error("Missing environment variables: %s", self._missing)
+            sys.exit(1)
+
+    def getenv(self, key):
+        value = os.getenv(key)
+        if value is None:
+            self._missing.append(key)
+        return value
+
+# Instantiate a configuration class
+config = Config()
+
+
 
 # Development changes to the installer won't be picked up unless
 # the binary uses a new name, or cache is disabled.
 # Set this flag to False if you are updating the installer
 # at CALICO_INSTALLER_URL without changing its name.
 USE_CACHED_INSTALLER = False
-
-
-class Config(object):
-    def __init__(self):
-        self.mesos_master = os.getenv('MESOS_MASTER', MESOS_MASTER)
-
-        self.etcd_binary_url = os.getenv("ETCD_BINARY_URL", ETCD_BINARY_URL)
-        self.etcd_service = os.getenv('ETCD_SRV', ETCD_DISCOVERY)
-
-        self.zk_persist_url = os.getenv('ZK')
-
-        self.max_concurrent_restarts = os.getenv('CALICO_MAX_RESTARTS', 1)
-        self.calicoctl_url = os.getenv('CALICO_CALICOCTL_URL', CALICOCTL_URL)
-        self.node_img = os.getenv('CALICO_NODE_IMG', CALICO_NODE_IMG)
-        self.libnetwork_img = os.getenv('CALICO_LIBNETWORK_IMG', CALICO_LIBNETWORK_IMG)
-        self.installer_url = os.getenv('CALICO_INSTALLER', CALICO_INSTALLER_URL)
-        self.calico_mesos_url = os.getenv('CALICO_MESOS_URL', CALICO_MESOS_URL)
-        self.allow_docker_update = os.getenv('CALICO_ALLOW_DOCKER_UPDATE', True)
-        self.allow_agent_update = os.getenv('CALICO_ALLOW_AGENT_UPDATE', True)
-
-# Instantiate a configuration class
-config = Config()

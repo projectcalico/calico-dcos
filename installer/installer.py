@@ -373,20 +373,19 @@ def cmd_get_agent_ip():
 
     Prints the IP to stdout
     """
-    # IP and port are supplied as arguments
-    # _log.debug("Arguments: %s", sys.argv)
-    host, port = sys.argv[2].split(":")
-    port = int(port)
-
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect((host, port))
-        our_ip = s.getsockname()[0]
-        s.close()
-    except socket.gaierror:
-        _log.error("Unable to connect to master at: %s:%d", host, port)
-        sys.exit(1)
-    print our_ip
+    # A comma separated list of host:port is supplied as the only argument.
+    for host, port in (hp.split(":") for hp in sys.argv[2].split(",")):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect((host, port))
+            our_ip = s.getsockname()[0]
+            s.close()
+            print our_ip
+            return
+        except socket.gaierror:
+            continue
+    _log.error("Failed to connect to any of: %s", sys.argv[2])
+    sys.exit(1)
 
 
 def initialise_logging():
