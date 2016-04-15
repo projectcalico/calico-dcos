@@ -40,6 +40,7 @@ from tasks import (Task, TaskRunEtcdProxy, TaskInstallDockerClusterStore,
 
 _log = logging.getLogger(__name__)
 
+
 # TODO
 # o  Need to check CPU/Mem for each calico task
 # o  Check that a task can reboot the agent (quick test to make sure this will fly)
@@ -387,10 +388,11 @@ class Agent(object):
         progress when a restart task is not finished.
         :return: True if any restart task is in progress.
         """
-        return any(t.restarts and not t.finished() for t in self.tasks)
+        return any(t.restarts and not t.finished() for t in self.tasks.values())
 
 
 class CalicoInstallerScheduler(mesos.interface.Scheduler):
+    max_num_concurrent_restart = 2
     def __init__(self):
         self.agents = {}
         self.zk = ZkDatastore(config.zk_persist_url)
@@ -405,7 +407,7 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         :param agent:
         :return: True if the agent can be restarted, False otherwise.
         """
-        num_restarting = sum(1 for a in self.agents if a.is_restarting()
+        num_restarting = sum(1 for a in self.agents.values() if a.is_restarting()
                                if a != agent)
         return num_restarting < self.max_num_concurrent_restart
 
@@ -490,7 +492,8 @@ def launch_framework():
     :return: The Mesos driver.  The caller should call driver.join() to ensure
     thread is blocked until driver exits.
     """
-    _log.info("Connecting to Master: %s", config.master_ip)
+    master_addr = "{}:{}".format(config.master_ip, config.master_port)
+    _log.info("Connecting to Master: %s", master_addr)
     framework = mesos_pb2.FrameworkInfo()
     framework.user = "root"  # Have Mesos fill in the current user.
     framework.name = "Calico framework"
@@ -502,12 +505,21 @@ def launch_framework():
     scheduler = CalicoInstallerScheduler()
     driver = mesos.native.MesosSchedulerDriver(scheduler,
                                                framework,
-                                               config.master_ip)
+                                               master_addr)
     driver.start()
     return driver
 
 
 if __name__ == "__main__":
+    _log.setLevel(logging.DEBUG)
+    formatter = logging.Formatter(
+                '%(asctime)s [%(levelname)s]\t%(name)s %(lineno)d: %(message)s')
+
+    # Create Console Logger
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(formatter)
+    _log.addHandler(handler)
     fdriver = launch_framework()
     fdriver.join()
     fdriver.join()

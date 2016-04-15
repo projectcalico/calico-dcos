@@ -160,7 +160,7 @@ class Task(object):
 
     @classmethod
     def new_task_id(cls):
-        return cls.__name__[4:] + "-" + uuid.uuid4().upper()
+        return cls.__name__[4:] + "-" + str(uuid.uuid4()).upper()
 
 
 class TaskRunEtcdProxy(Task):
@@ -176,7 +176,7 @@ class TaskRunEtcdProxy(Task):
 
     def as_new_mesos_task(self, agent_id):
         etcd_download = config.etcd_binary_url.rsplit("/", 1)
-        if etcd_download.endswith(".tar.gz"):
+        if etcd_download[-1].endswith(".tar.gz"):
             etcd_img = "./%s/etcd" % etcd_download[:-7]
         else:
             etcd_img = "./%s" % etcd_download
@@ -185,12 +185,12 @@ class TaskRunEtcdProxy(Task):
         task.container.type = mesos_pb2.ContainerInfo.MESOS
         task.command.value = etcd_img + \
                              " --proxy=on " + \
-                             "--discovery-srv=" + config.etcd_discovery
+                             "--discovery-srv=" + config.etcd_service
         task.command.user = "root"
 
         # Download etcd binary
         uri = task.command.uris.add()
-        uri.value = config.etcd_proxy_binary_url
+        uri.value = config.etcd_binary_url
         uri.executable = False
         uri.cache = True
         uri.extract = True
@@ -216,7 +216,7 @@ class TaskInstallDockerClusterStore(Task):
 
         # Download the installer binary
         uri = task.command.uris.add()
-        uri.value = config.installer
+        uri.value = config.installer_url
         uri.executable = True
         uri.cache = False
         return task
