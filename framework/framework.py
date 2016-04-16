@@ -26,17 +26,17 @@ Dockerized:
 Description:
   Mesos framework used to install Calico in a Mesos cluster..
 """
-import json
 import logging
 
 import mesos.interface
 import mesos.native
-from kazoo.client import KazooClient, NoNodeError, NodeExistsError
 from mesos.interface import mesos_pb2
 
 from config import config
-from tasks import (Task, TaskRunEtcdProxy, TaskInstallDockerClusterStore,
-    TaskInstallNetmodules, TaskRunCalicoNode, TaskRunCalicoLibnetwork)
+from tasks import Task, TASK_ORDER
+from webserver import launch_webserver
+from zookeeper import ZkDatastore
+
 
 _log = logging.getLogger(__name__)
 
@@ -47,67 +47,6 @@ _log = logging.getLogger(__name__)
 #    caused by restart - worst case scenario is we keep restarting the node that runs the framework...
 #    kill one agent, framework moves to another, then we next that agent...and so on.  Shouldn't actually
 #    matter, but it would slow things down.
-
-TASK_ORDER = [
-    TaskRunEtcdProxy,
-    TaskInstallDockerClusterStore,
-    TaskInstallNetmodules,
-    TaskRunCalicoNode,
-    TaskRunCalicoLibnetwork
-]
-TASKS_BY_CLASSNAME = {cls.__name__: cls for cls in TASK_ORDER}
-
-
-class ZkDatastore(object):
-    def __init__(self):
-        self.zk_prefix = "root"
-        self._zk = KazooClient(hosts=config.zk_hosts)
-        self._zk.start()
-        self._zk.ensure_path(self.agents_dir())
-
-    def agents_dir(self):
-        """
-        Return the directory which we store agents information in.
-        :return: Agents directory.
-        """
-        return config.zk_persist_dir + "/agent"
-
-    def agent_path(self, agent_id):
-        """
-        Return the path for storing agent configuration.
-        :param agent_id:  The agent ID
-        :return:  The agent specific path.
-        """
-        return config.zk_persist_dir + "/agent/" + agent_id
-
-    def load_tasks(self, agent_id):
-        try:
-            tasks_str, _stat = self._zk.get(self.agent_path(agent_id))
-        except NoNodeError:
-            tasks_dict = {}
-        else:
-            tasks_dict = json.loads(tasks_str)
-
-        tasks = {
-            cn: TASKS_BY_CLASSNAME[cn].from_dict(task_dict)
-            for cn, task_dict in tasks_dict.iteritems()
-        }
-        return tasks
-
-    def store_tasks(self, agent_id, tasks):
-        """
-        Store a group of tasks for an agent.
-        :param tasks:
-        :return:
-        """
-        tasks_dict = {
-            cn: task.to_dict() for cn, task in tasks.iteritems()
-        }
-        tasks_json = json.dumps(tasks_dict)
-        try:
-            self._zk.create(self.agent_path(agent_id), tasks_json)
-        except NodeExistsError:
-            self._zk.set(self.agent_path(agent_id), tasks_json)
 
 
 class Agent(object):
@@ -502,9 +441,9 @@ def launch_framework():
     _log.info("Connecting to Master: %s", config.mesos_master)
     framework = mesos_pb2.FrameworkInfo()
     framework.user = "root"
-    framework.name = "Calico framework"
-    framework.principal = "calico-framework"
-    framework.id.value = "calico-framework"
+    framework.name = "calico"
+    framework.principal = "calico"
+    framework.id.value = "calico"
     framework.failover_timeout = 604800
 
     _log.info("Launching Calico Mesos scheduler")
@@ -535,5 +474,11 @@ def initialise_logging():
 
 if __name__ == "__main__":
     initialise_logging()
-    fdriver = launch_framework()
-    fdriver.join()
+    driver_thread = launch_framework()
+    webserver_thread = launch_webserver()
+
+    # We only join the driver thread, since we want to terminate the framework
+    # if the driver dies - in which case Marathon will re-launch.  If the
+    # webserver dies (which is less important), Marathon will fail health
+    # checks and relaunch the framework.
+    driver_thread.join()

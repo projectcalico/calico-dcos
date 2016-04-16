@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="http://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/css/bootstrap.min.css">
+
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.3/jquery.min.js"></script>
+<script src="http://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/js/bootstrap.min.js"></script>
+<script>
+var server_url = "http://172.25.20.5:5000/json";
+
+function refreshTable() {
+  $("#nodes-table").find("tr:gt(0)").remove();
+
+  $.ajax({url: server_url, dataType:'json', timeout:5000,
+    success:function(nodes, textStatus, jqXHR) {
+
+      if (Object.keys(nodes).length != 0) {
+        for (nodeID in nodes) {
+          node = nodes[nodeID];
+          var node_tr = buildNodeRow(nodeID, node);
+          $("#nodes-table").append(node_tr);
+
+        }
+      }
+
+      setTimeout(refreshTable, 30000);
+    },
+    error:function(jqXHR, textStatus, error){
+      console.log(error);
+      setTimeout(refreshTable, 5000);
+    }
+  });
+}
+
+function buildNodeRow(nodeID, node) {
+  nodeStatus = -1;
+  libnetworkStatus = -1;
+  etcdProxyStatus = -1;
+  netmodulesInstallStatus = -1;
+  dockerInstallStatus = -1;
+
+  if ("TaskRunCalicoNode" in node)
+    nodeStatus = node["TaskRunCalicoNode"]["state"]
+  if ("TaskRunCalicoLibnetwork" in node)
+    libnetworkStatus = node["TaskRunCalicoLibnetwork"]["state"]
+  if ("TaskRunEtcdProxy" in node)
+    etcdProxyStatus = node["TaskRunEtcdProxy"]["state"]
+  if ("TaskInstallNetmodules" in node)
+    netmodulesInstallStatus = node["TaskInstallNetmodules"]["state"]
+  if ("TaskInstallDockerClusterStore" in node)
+    dockerInstallStatus = node["TaskInstallDockerClusterStore"]["state"]
+
+  var node_tr = $(
+    "<tr id='" + nodeID + "'>" +
+      "<td>" + nodeID + "</td>" +
+      "<td>" + statusIdToString(nodeStatus) + "</td>" +
+      "<td>" + statusIdToString(libnetworkStatus) + "</td>" +
+      "<td>" + statusIdToString(etcdProxyStatus) + "</td>" +
+      "<td>" + statusIdToString(netmodulesInstallStatus) + "</td>" +
+      "<td>" + statusIdToString(dockerInstallStatus) + "</td>" +
+    "</tr>"
+  );
+
+  return node_tr;
+}
+
+function statusIdToString(status) {
+  switch(status) {
+    case 0:
+      return "STARTING";
+    case 1:
+      return "RUNNING";
+    case 2:
+      return "FINISHED";
+    case 3:
+      return "FAILED";
+    case 4:
+      return "KILLED";
+    case 5:
+      return "LOST";
+    case 6:
+      return "STAGING";
+    case 7:
+      return "ERROR";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+$(document).ready(function() {
+  refreshTable();
+});
+</script>
+
+<title>  Calico Health  </title>
+
+</head>
+<body>
+  <div class="container">
+    <div>
+      <h1>Calico Health</h1>
+    </div>
+
+    <div>
+      <h2>Nodes</h2>
+      <div>
+        <table id="nodes-table" class="table table-bordered table-striped">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Calico-Node</th>
+              <th>Calico-Libnetwork</th>
+              <th>Etcd Proxy</th>
+              <th>Netmodules Install</th>
+              <th>Docker Install</th>
+            </tr>
+          </thead>
+          <tbody id="node-entries">
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</body>
