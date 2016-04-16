@@ -194,7 +194,7 @@ class TaskRunEtcdProxy(Task):
         task.container.type = mesos_pb2.ContainerInfo.MESOS
         task.command.value = etcd_img + \
                              " --proxy=on" + \
-                             " --discovery-srv=" + config.etcd_service
+                             " --discovery-srv=" + config.etcd_discovery
         task.command.user = "root"
 
         # Download etcd binary
