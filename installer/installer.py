@@ -212,11 +212,16 @@ def move_file_if_missing(from_file, to_file):
     :return: Whether the file was moved.
     """
     _log.debug("Move file from %s to %s", from_file, to_file)
+    if not os.path.exists(from_file):
+        _log.error("From file does not exist.")
+        return False
     if os.path.exists(to_file):
         _log.debug("File %s already exists, not copying", to_file)
         return False
     ensure_dir(os.path.dirname(to_file))
-    os.rename(from_file, to_file)
+    # Can't use os.move since its a different hard drive type?
+    # http://stackoverflow.com/questions/11578443/trigger-io-errno-18-cross-device-link
+    shutil.move(from_file, to_file)
     return True
 
 
@@ -233,7 +238,7 @@ def cmd_install_netmodules():
 
     libraries = modules_config.setdefault("libraries", [])
     files = [library.get("file") for library in libraries]
-    if "/opt/mesosphere/lib/mesos/libmesos_network_isolator.so" not in files:
+    if "/opt/mesosphere/lib/libmesos_network_isolator.so" not in files:
         # Flag that modules need to be updated and reset the agent create
         # time to ensure we restart the agent.
         _log.debug("Configure netmodules and calico in Mesos")
@@ -242,9 +247,10 @@ def cmd_install_netmodules():
         store_config(NETMODULES_INSTALL_CONFIG, install_config)
 
         # Copy the netmodules .so and the calico binary.
+        # TODO: Calculate the filename instead of just using this static one
         move_file_if_missing(
-            "./libmesos_network_isolator.so",
-            "/opt/mesosphere/lib/mesos/libmesos_network_isolator.so"
+            "netmodules/libmesos_network_isolator-0.28.1-centos7-i386.so",
+            "/opt/mesosphere/lib/libmesos_network_isolator.so"
         )
         move_file_if_missing(
             "./calico_mesos",
@@ -253,7 +259,7 @@ def cmd_install_netmodules():
 
         # Update the modules config to reference the .so
         new_library = {
-          "file": "/opt/mesosphere/lib/mesos/libmesos_network_isolator.so",
+          "file": "/opt/mesosphere/lib/libmesos_network_isolator.so",
           "modules": [
             {
               "name": "com_mesosphere_mesos_NetworkIsolator",
@@ -392,7 +398,7 @@ def cmd_get_agent_ip():
     for host, port in (hp.split(":") for hp in sys.argv[2].split(",")):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect((host, port))
+            s.connect((host, int(port)))
             our_ip = s.getsockname()[0]
             s.close()
             print our_ip

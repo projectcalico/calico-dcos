@@ -375,7 +375,7 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         Callback used when the framework is successfully registered.
         """
         _log.info("REGISTERED: with framework ID %s", frameworkId.value)
-        # self.zk.set_framework_id(frameworkId.value)
+        self.zk.set_framework_id(frameworkId.value)
 
     def reregistered(self, driver, frameworkId, masterInfo):
         """
@@ -443,8 +443,13 @@ def launch_framework():
     framework.user = "root"
     framework.name = "calico"
     framework.principal = "calico"
-    framework.id.value = "calico"
     framework.failover_timeout = 604800
+    zk = ZkDatastore()
+    old_id = zk.get_framework_id()
+    if old_id:
+        _log.info("Using old framework ID: %s", old_id)
+        framework.id.value = old_id
+
 
     _log.info("Launching Calico Mesos scheduler")
     scheduler = CalicoInstallerScheduler()

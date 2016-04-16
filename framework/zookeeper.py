@@ -12,6 +12,22 @@ class ZkDatastore(object):
         self._zk = KazooClient(hosts=config.zk_hosts)
         self._zk.start()
         self._zk.ensure_path(self.agents_dir())
+        self._zk.ensure_path(self.framework_id_dir())
+        self.framework_id_path = self.framework_id_dir() + "/framework"
+
+    def get_framework_id(self):
+        try:
+            framework_id, _ = self._zk.get(self.framework_id_path)
+            return framework_id
+        except NoNodeError:
+            return None
+
+    def set_framework_id(self, framework_id):
+        try:
+            self._zk.create(self.framework_id_path, str(framework_id))
+        except NodeExistsError:
+            # TODO: Should check if its the same framework id, but not sure how we'd handle that case yet
+            pass
 
     def agents_dir(self):
         """
@@ -19,6 +35,13 @@ class ZkDatastore(object):
         :return: Agents directory.
         """
         return config.zk_persist_dir + "/agent"
+
+    def framework_id_dir(self):
+        """
+        Return the directory where we store framework ID in.
+        :return: Framework ID directory
+        """
+        return config.zk_persist_dir
 
     def agent_path(self, agent_id):
         """

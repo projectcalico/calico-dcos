@@ -24,9 +24,6 @@ from config import config, USE_CACHED_INSTALLER
 
 _log = logging.getLogger(__name__)
 
-#TODO We need a better way of handling which .so we need!
-NETMODULES_SO_URL = "http://172.25.20.11/libmesos_network_isolator.so"
-
 
 class Task(object):
     hash = None
@@ -274,9 +271,10 @@ class TaskInstallNetmodules(Task):
 
         # Download the Netmodules .so
         uri = task.command.uris.add()
-        uri.value = NETMODULES_SO_URL
-        uri.executable = True
+        uri.value = config.netmodules_url
+        uri.executable = False
         uri.cache = True
+        uri.extract = True
 
         # Download calico_mesos
         uri = task.command.uris.add()
