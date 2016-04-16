@@ -12,10 +12,6 @@ _log = logging.getLogger(__name__)
 #TODO We need a better way of handling which .so we need!
 NETMODULES_SO_URL = "http://172.25.20.11/libmesos_network_isolator.so"
 
-# Expected task CPUs and Mem usage
-TASK_CPUS = 0.1
-TASK_MEM = 128.0
-
 
 class Task(object):
     hash = None
@@ -128,7 +124,8 @@ class Task(object):
     @classmethod
     def allowed(cls):
         """
-        Whether this task is allowed.
+        Whether this task is allowed.  A class may override this if there are
+        configuration options that may be used to disallow the step.
         :return: True
         """
         return True
@@ -145,15 +142,25 @@ class Task(object):
         return task
 
     @classmethod
-    def can_accept_offer(self, offer):
+    def can_accept_offer(cls, offer):
         """
         Determine if this task type can accept the supplied offer or not.
         :param offer: The offer.
         :return: True if the offer contains sufficient resource to accept,
         oftherwise False.
         """
-        #TODO Need to check CPU and MEM constraints.
-        return True
+        cpus = 0.0
+        mem = 0.0
+        for resource in offer.resources:
+            if resource.name == "cpus":
+                cpus += resource.scalar.value
+            elif resource.name == "mem":
+                mem += resource.scalar.value
+        can_accept = cpus >= cls.cpus and mem >= cls.mem
+        _log.debug("Offer resources:  mem=%s, cpus=%s", mem, cpus)
+        _log.debug("Required resources:  mem=%s, cpus=%s", cls.mem, cls.cpus)
+        _log.info("Can accept offer: %s", can_accept)
+        return can_accept
 
     @classmethod
     def classname_from_task_id(cls, task_id):
@@ -226,7 +233,8 @@ class TaskInstallDockerClusterStore(Task):
     @classmethod
     def allowed(cls):
         """
-        Whether this task is allowed.
+        Whether this task is allowed.  There is a configuration option to
+        prevent a Docker restart - in which case this step should be skipped.
         :return: True
         """
         _log.debug("Allow docker update: %s", config.allow_docker_update)
@@ -272,7 +280,8 @@ class TaskInstallNetmodules(Task):
     @classmethod
     def allowed(cls):
         """
-        Whether this task is allowed.
+        Whether this task is allowed.    There is a configuration option to
+        prevent an Agent restart - in which case this step should be skipped.
         :return: True
         """
         _log.debug("Allow agent update: %s", config.allow_agent_update)

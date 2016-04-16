@@ -135,11 +135,6 @@ class Agent(object):
         Tasks for each task type (keyed off the class name)
         """
 
-        self.offers_suppressed = False
-        """
-        Whether offers are currently suppressed.
-        """
-
     def __repr__(self):
         return "Agent(%s)" % self.agent_id
 
@@ -222,9 +217,7 @@ class Agent(object):
                     _log.debug("Task cannot be offered - wait")
                     return None
 
-        _log.debug("All tasks are running, suppress offers")
-        self.offers_suppressed = True
-        driver.suppressOffers()
+        _log.debug("All tasks are running")
         return None
 
     def trigger_resync(self, driver):
@@ -395,13 +388,6 @@ class Agent(object):
             self.agent_syncd = True
             driver.reconcileTasks([])
 
-        # If offers were suppressed, then revive them now since something has
-        # changed.
-        if self.offers_suppressed:
-            _log.debug("Revive offers for agent")
-            driver.reviveOffers()
-            self.offers_suppressed = False
-
     def is_restarting(self):
         """
         Return whether a component restart is in progress.  A restart is in
@@ -550,5 +536,4 @@ def initialise_logging():
 if __name__ == "__main__":
     initialise_logging()
     fdriver = launch_framework()
-    fdriver.join()
     fdriver.join()
