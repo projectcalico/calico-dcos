@@ -218,10 +218,14 @@ def move_file_if_missing(from_file, to_file):
     if os.path.exists(to_file):
         _log.debug("File %s already exists, not copying", to_file)
         return False
+    tmp_to_file = to_file + ".tmp"
+
+    # We cannot use os.rename() because that does not work across devices.  To
+    # ensure we still do an atomic move, copy the file to a temporary location
+    # and then rename it.
     ensure_dir(os.path.dirname(to_file))
-    # Can't use os.move since its a different hard drive type?
-    # http://stackoverflow.com/questions/11578443/trigger-io-errno-18-cross-device-link
-    shutil.move(from_file, to_file)
+    shutil.move(from_file, tmp_to_file)
+    os.rename(tmp_to_file, to_file)
     return True
 
 

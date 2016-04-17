@@ -7,12 +7,13 @@
 <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.3/jquery.min.js"></script>
 <script src="http://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/js/bootstrap.min.js"></script>
 <script>
-var server_url = "http://172.25.20.5:5000/json";
+
+var server_url = "json";
 
 function refreshTable() {
   $("#nodes-table").find("tr:gt(0)").remove();
 
-  $.ajax({url: server_url, dataType:'json', timeout:5000,
+  $.ajax({url:server_url, dataType:'json', timeout:5000,
     success:function(nodes, textStatus, jqXHR) {
 
       if (Object.keys(nodes).length != 0) {
@@ -67,6 +68,8 @@ function buildNodeRow(nodeID, node) {
 
 function statusIdToString(status) {
   switch(status) {
+    case -1:
+      return "NOT RUN";
     case 0:
       return "STARTING";
     case 1:
@@ -93,33 +96,30 @@ $(document).ready(function() {
 });
 </script>
 
-<title>  Calico Health  </title>
+<title>  Calico networking status  </title>
 
 </head>
 <body>
   <div class="container">
     <div>
-      <h1>Calico Health</h1>
+      <h1>Calico networking status</h1>
     </div>
 
     <div>
-      <h2>Nodes</h2>
-      <div>
-        <table id="nodes-table" class="table table-bordered table-striped">
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Calico-Node</th>
-              <th>Calico-Libnetwork</th>
-              <th>Etcd Proxy</th>
-              <th>Netmodules Install</th>
-              <th>Docker Install</th>
-            </tr>
-          </thead>
-          <tbody id="node-entries">
-          </tbody>
-        </table>
-      </div>
+      <table id="nodes-table" class="table table-bordered table-striped">
+        <thead>
+          <tr>
+            <th>Agent</th>
+            <th>Calico networking</th>
+            <th>Docker network driver</th>
+            <th>Etcd Proxy</th>
+            <th>Netmodules Install</th>
+            <th>Docker Install</th>
+          </tr>
+        </thead>
+        <tbody id="node-entries">
+        </tbody>
+      </table>
     </div>
   </div>
 </body>

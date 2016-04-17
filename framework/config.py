@@ -50,11 +50,16 @@ class Config(object):
 
         self.webserver_bind_ip = self.getenv("LIBPROCESS_IP")
         self.webserver_bind_port = self.getenv("PORT0")
+        self.webserver_dns = self.getenv("CALICO_STATUS_DNS")
 
         # The zk persist URL should be of the form:
         # zk://<host1:port1>,<host2:port2>.../directory/to/story/config
         assert self.zk_persist_url.startswith("zk://")
         self.zk_hosts, self.zk_persist_dir = self.zk_persist_url[5:].split("/", 1)
+
+        # Construct the web status URL
+        self.webserver_url = "http://%s:%s/" % (self.webserver_dns,
+                                                self.webserver_bind_port)
 
         # Trace out the parsed environment variables.
         for key, val in self.__dict__.iteritems():

@@ -86,7 +86,7 @@ class ZkDatastore(object):
         into Task objects.
         """
         agent_task_dicts = {}
-        agent_ids = self._zk.get_children(self.agents_dir)
+        agent_ids = self._zk.get_children(self.agents_dir())
         for agent_id in agent_ids:
             try:
                 tasks_str, _stat = self._zk.get(self.agent_path(agent_id))

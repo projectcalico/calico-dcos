@@ -21,6 +21,8 @@ from flask import Flask
 from config import config
 from zookeeper import ZkDatastore
 
+# Instantiate the Flask app and a ZkDatastore: we use our own datastore
+# from the framework since we are running in a different thread.
 app = Flask(__name__, static_url_path='')
 zk = ZkDatastore()
 

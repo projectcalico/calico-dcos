@@ -42,12 +42,13 @@ _log = logging.getLogger(__name__)
 
 
 # TODO
-# o  Need to check CPU/Mem for each calico task
 # o  Can we determine what slave the framework is running on?  That would help limit the issues
 #    caused by restart - worst case scenario is we keep restarting the node that runs the framework...
 #    kill one agent, framework moves to another, then we next that agent...and so on.  Shouldn't actually
 #    matter, but it would slow things down.
 
+# Instantiate a ZooKeeper instance for use by the Framework.
+zk = ZkDatastore()
 
 class Agent(object):
     def __init__(self, scheduler, agent_id):
@@ -146,6 +147,7 @@ class Agent(object):
             _log.debug("Handling task: '%s'", task_class.__name__)
             if not task_class.allowed():
                 _log.debug("Task is not allowed - skipping")
+                continue
 
             if self.task_needs_scheduling(task_class):
                 _log.debug("Task needs scheduling")
@@ -156,6 +158,10 @@ class Agent(object):
                     _log.debug("Task cannot be offered - wait")
                     return None
 
+            if self.task_in_progress(task_class):
+                _log.debug("Waiting for task to complete")
+                return None
+
         _log.debug("All tasks are running")
         return None
 
@@ -165,15 +171,10 @@ class Agent(object):
         :param driver:
         :return:
         """
-        if not self.scheduler.zk:
-            _log.info("No ZK for persistent state.")
-            self.agent_syncd = True
-            return
-
         # Query the state of each task that was previously running.  Terminated
         # tasks do not need to be queried because their state won't have
         # changed, and the task may have been tidied up.
-        self.tasks = self.scheduler.zk.load_tasks(self.agent_id)
+        self.tasks = zk.load_tasks(self.agent_id)
         task_statuses = [task.get_task_status(self)
                          for task in self.tasks.itervalues() if task.running()]
 
@@ -202,8 +203,7 @@ class Agent(object):
         self.tasks[task_class.__name__] = task
 
         # Persist these tasks to the datastore.
-        if self.scheduler.zk:
-            self.scheduler.zk.store_tasks(self.agent_id, self.tasks)
+        zk.store_tasks(self.agent_id, self.tasks)
 
         return task
 
@@ -255,6 +255,17 @@ class Agent(object):
 
         _log.debug("Task '%s' does not need scheduling", task_class)
         return False
+
+    def task_in_progress(self, task_class):
+        """
+        A task is in progress if it is running and the task is not persistent.
+        :param task_class:
+        :return:
+        """
+        task = self._task(task_class)
+        if not task:
+            return False
+        return task.running() and not task.persistent
 
     def task_running(self, task_class):
         """
@@ -317,8 +328,7 @@ class Agent(object):
             _log.debug("\tHealthy: %s", update.healthy)
 
         # Persist the updated tasks to the datastore.
-        if self.scheduler.zk:
-            self.scheduler.zk.store_tasks(self.agent_id, self.tasks)
+        zk.store_tasks(self.agent_id, self.tasks)
 
         # If we were resyncing then check if all of our tasks are now syncd.
         if not self.agent_syncd and all(task.clean for task in self.tasks.values()):
@@ -341,21 +351,25 @@ class Agent(object):
 class CalicoInstallerScheduler(mesos.interface.Scheduler):
     def __init__(self):
         self.agents = {}
-        self.zk = ZkDatastore()
 
     def can_restart_agent(self, agent):
         """
         Determine if we are allowed to trigger an agent restart.
 
         We only allow a maximum number of agents to be restarted at the same
-        time.  We can ignore the requesting agent in the count.
+        time.  If the requesting agent is already restarting then it is
+        allowed to restart.
 
         :param agent:
         :return: True if the agent can be restarted, False otherwise.
         """
-        num_restarting = sum(1 for a in self.agents.values() if a.is_restarting()
-                               if a != agent)
-        return num_restarting < config.max_concurrent_restarts
+        if agent.is_restarting():
+            _log.debug("Agent is already restarting - allowed to restart")
+            return True
+        num_restarting = sum(1 for a in self.agents.values() if a.is_restarting())
+        can_restart = num_restarting < config.max_concurrent_restarts
+        _log.debug("Can restart agent: ", can_restart)
+        return can_restart
 
     def get_agent(self, agent_id):
         """
@@ -375,7 +389,7 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         Callback used when the framework is successfully registered.
         """
         _log.info("REGISTERED: with framework ID %s", frameworkId.value)
-        self.zk.set_framework_id(frameworkId.value)
+        zk.set_framework_id(frameworkId.value)
 
     def reregistered(self, driver, frameworkId, masterInfo):
         """
@@ -444,7 +458,8 @@ def launch_framework():
     framework.name = "calico"
     framework.principal = "calico"
     framework.failover_timeout = 604800
-    zk = ZkDatastore()
+    framework.webui_url = config.webserver_url
+
     old_id = zk.get_framework_id()
     if old_id:
         _log.info("Using old framework ID: %s", old_id)
