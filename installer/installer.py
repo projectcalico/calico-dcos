@@ -22,6 +22,7 @@ import socket
 import subprocess
 import sys
 import time
+import subprocess
 from collections import OrderedDict
 
 import psutil
@@ -44,6 +45,9 @@ AGENT_MODULES_CONFIG = "/opt/mesosphere/etc/mesos-slave-modules.json"
 
 # Docker version regex
 DOCKER_VERSION_RE = re.compile(r"Docker version (\d+)\.(\d+)\.(\d+)^\d.*")
+
+# Distro versioning regexes
+CENTOS_VERSION_RE = re.compile("([\d\.]+)")
 
 # Fixed address for our etcd proxy.
 CLUSTER_STORE_ETCD_PROXY = "etcd://127.0.0.1:2379"
@@ -150,8 +154,6 @@ def find_process(exe_re):
         p for p in psutil.process_iter()
         if exe_re.match(" ".join(p.cmdline()))
     ]
-    for p in psutil.process_iter():
-        _log.info(p.cmdline())
 
     # Multiple processes suggests our query is not correct.
     if len(processes) > 1:
@@ -309,6 +311,38 @@ def move_file_if_missing(from_file, to_file):
     os.rename(tmp_to_file, to_file)
     return True
 
+def get_host_info():
+    """
+    Gather information from the host OS.
+    :return: A tuple containing the mesos-version, distribution name, architecture,
+      in that order. Contents of any of the three tuple values may be None if
+      we were unable to detect them.
+    """
+    _log.info("Gathering host information.")
+
+    # Get Architecture
+    arch = subprocess.check_output(["uname", "-p"]).strip()
+    _log.info("Arch: %s", arch)
+
+    # Get Mesos Version
+    mesos_version = subprocess.check_output(["/opt/mesosphere/bin/mesos-slave","--version"]).strip().split(" ")[1]
+    _log.info("Mesos Version: %s" % mesos_version)
+
+    # Get Distribution
+    # Centos
+    if os.path.exists("/etc/centos-release"):
+        with open('/etc/centos-release') as f:
+            release_line = f.readline()
+        release_version = CENTOS_VERSION_RE.search(release_line).group()
+        major_release_number = release_version.split(".")[0]
+        distro = "centos%s" % major_release_number
+    else:
+        # TODO: check for other distros here
+        _log.error("Unable to detect Linux distribution.")
+        distro = None
+    _log.info("Distro: %s", distro)
+
+    return (mesos_version, distro, arch)
 
 def cmd_install_netmodules():
     """
@@ -335,6 +369,22 @@ def cmd_install_netmodules():
     libraries = modules_config.setdefault("libraries", [])
     files = [library.get("file") for library in libraries]
     if "/opt/mesosphere/lib/libmesos_network_isolator.so" not in files:
+        # Construct the desired netmodules.so file based on the host's base information
+        mesos_version, distro, arch = get_host_info()
+        if not mesos_version or not distro or not arch:
+            _log.error("Unrecognizable System. Performing a no-op for netmodules.")
+            return
+
+        network_isolator_so = "netmodules/libmesos_network_isolator-{}-{}-{}.so".format(
+            mesos_version,
+            distro,
+            arch)
+
+        if not os.path.exists(network_isolator_so):
+            _log.error("No matching netmodules found for this system: %s" % network_isolator_so)
+            # No-op to skip the netmodules installation.
+            return
+
         # Flag that modules need to be updated and reset the agent create
         # time to ensure we restart the agent.
         _log.debug("Configure netmodules and calico in Mesos")
@@ -343,9 +393,8 @@ def cmd_install_netmodules():
         store_config(NETMODULES_INSTALL_CONFIG, install_config)
 
         # Copy the netmodules .so and the calico binary.
-        # TODO: Calculate the filename instead of just using this static one
         move_file_if_missing(
-            "netmodules/libmesos_network_isolator-0.28.1-centos7-i386.so",
+            network_isolator_so,
             "/opt/mesosphere/lib/libmesos_network_isolator.so"
         )
         move_file_if_missing(
