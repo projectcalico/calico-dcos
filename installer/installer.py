@@ -44,7 +44,7 @@ AGENT_CONFIG = "/opt/mesosphere/etc/mesos-slave-common"
 AGENT_MODULES_CONFIG = "/opt/mesosphere/etc/mesos-slave-modules.json"
 
 # Docker version regex
-DOCKER_VERSION_RE = re.compile(r"Docker version (\d+)\.(\d+)\.(\d+)^\d.*")
+DOCKER_VERSION_RE = re.compile(r"Docker version (\d+)\.(\d+)\.(\d+).*")
 
 # Netmodules information for determining correct netmodules.so
 DISTRO_INFO_FILE = "/etc/os-release"
@@ -337,7 +337,8 @@ def get_host_info():
     release_info = load_property_file(DISTRO_INFO_FILE)
     if release_info:
         if 'ID' in release_info:
-            distro = release_info['ID'][0]
+            # Remove quotes surrounding distro
+            distro = release_info['ID'][0].replace('\"', '')
         else:
             _log.error("Couldn't find ID field in %s", DISTRO_INFO_FILE)
     else:
