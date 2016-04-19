@@ -46,8 +46,9 @@ AGENT_MODULES_CONFIG = "/opt/mesosphere/etc/mesos-slave-modules.json"
 # Docker version regex
 DOCKER_VERSION_RE = re.compile(r"Docker version (\d+)\.(\d+)\.(\d+)^\d.*")
 
-# Distro versioning regexes
-CENTOS_VERSION_RE = re.compile("([\d\.]+)")
+# Netmodules information for determining correct netmodules.so
+DISTRO_INFO_FILE = "/etc/os-release"
+NETWORK_ISOLATOR_SO_BASENAME = "libmesos_network_isolator"
 
 # Fixed address for our etcd proxy.
 CLUSTER_STORE_ETCD_PROXY = "etcd://127.0.0.1:2379"
@@ -322,29 +323,27 @@ def get_host_info():
     _log.info("Gathering host information.")
 
     # Get Architecture
-    arch, exc = command("uname", args=["-p"], paths=["/usr/bin", "/bin"])
+    arch, _ = command("uname", args=["-m"], paths=["/usr/bin", "/bin"])
     _log.info("Arch: %s", arch)
 
     # Get Mesos Version
-    raw, exc = command("mesos-slave", args=["--version"],
+    raw_mesos_version, _ = command("mesos-slave", args=["--version"],
                        paths=["/opt/mesosphere/bin"])
-    mesos_version = raw.split(" ")[1] if raw else None
+    mesos_version = raw_mesos_version.split(" ")[1] if raw_mesos_version else None
     _log.info("Mesos Version: %s" % mesos_version)
 
     # Get Distribution
-    # Centos
-    if os.path.exists("/etc/centos-release"):
-        with open('/etc/centos-release') as f:
-            release_line = f.readline()
-        release_version = CENTOS_VERSION_RE.search(release_line).group()
-        major_release_number = release_version.split(".")[0]
-        distro = "centos%s" % major_release_number
+    distro = None
+    release_info = load_property_file(DISTRO_INFO_FILE)
+    if release_info:
+        if 'ID' in release_info:
+            distro = release_info['ID'][0]
+        else:
+            _log.error("Couldn't find ID field in %s", DISTRO_INFO_FILE)
     else:
-        # TODO: check for other distros here
-        _log.error("Unable to detect Linux distribution.")
-        distro = None
-    _log.info("Distro: %s", distro)
+        _log.error("Couldn't find release-info file: %s", DISTRO_INFO_FILE)
 
+    _log.info("Distro: %s", distro)
     return (mesos_version, distro, arch)
 
 
@@ -379,7 +378,8 @@ def cmd_install_netmodules():
             _log.error("Unrecognizable System. Performing a no-op for netmodules.")
             return
 
-        network_isolator_so = "netmodules/libmesos_network_isolator-{}-{}-{}.so".format(
+        network_isolator_so = "netmodules/{}-{}-{}-{}.so".format(
+            NETWORK_ISOLATOR_SO_BASENAME,
             mesos_version,
             distro,
             arch)
