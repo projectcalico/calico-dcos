@@ -22,7 +22,6 @@ import socket
 import subprocess
 import sys
 import time
-import subprocess
 from collections import OrderedDict
 
 import psutil
@@ -31,15 +30,17 @@ _log = logging.getLogger(__name__)
 
 # Calico installation config files
 INSTALLER_CONFIG_DIR = "/etc/calico/installer"
-NETMODULES_INSTALL_CONFIG= INSTALLER_CONFIG_DIR + "/netmodules"
+NETMODULES_INSTALL_CONFIG = INSTALLER_CONFIG_DIR + "/netmodules"
 DOCKER_INSTALL_CONFIG = INSTALLER_CONFIG_DIR + "/docker"
 
 # Docker information for a standard Docker install.
-DOCKER_DAEMON_EXE_RE = re.compile(r"(.*/)?docker\s+(--)?daemon(\s+.*)?")
+DOCKER_DAEMON_EXE_RE = re.compile(r"(.*/)?docker")
+DOCKER_DAEMON_PARMS_RE = re.compile(r"(--)?daemon")
 DOCKER_DAEMON_CONFIG = "/etc/docker/daemon.json"
 
 # Docker information for a standard Docker install.
-AGENT_EXE_RE = re.compile(r"(.*/)?mesos-slave(\s+.*)?")
+AGENT_EXE_RE = re.compile(r"(.*/)?mesos-slave")
+AGENT_EXE_PARMS_RE = None
 AGENT_CONFIG = "/opt/mesosphere/etc/mesos-slave-common"
 AGENT_MODULES_CONFIG = "/opt/mesosphere/etc/mesos-slave-modules.json"
 
@@ -61,12 +62,15 @@ MAX_TIME_FOR_AGENT_RESTART = 30
 PROCESS_STABILITY_TIME = 5
 
 
-def command(command, args=[], paths=[]):
+def run_command(command, args=None, paths=None):
     """
     Run a command on the host.
     :return: A tuple of (output, exception).  Either one of output or exception
     will be None.
     """
+    args = args or []
+    paths = paths or []
+
     # Locate the command from the possible list of paths (if supplied).
     for path in paths:
         new_command = os.path.join(path, command)
@@ -92,8 +96,8 @@ def docker_version_supported():
     Check if the host has a version of Docker that is supported.
     :return: True if supported.
     """
-    res, exc = command("docker", args=["--version"],
-                       paths=["/usr/bin", "/bin"])
+    res, exc = run_command("docker", args=["--version"],
+                           paths=["/usr/bin", "/bin"])
 
     if exc:
         _log.warning("Unable to query Docker version")
@@ -107,7 +111,7 @@ def docker_version_supported():
     vmajor = int(version_match.group(1))
     vminor = int(version_match.group(2))
     vpatch = int(version_match.group(3))
-    if (vmajor, vminor, vpatch) < (1, 9, 0):
+    if (vmajor, vminor, vpatch) < (1, 10, 0):
         _log.warning("Docker version is not supported")
         return False
 
@@ -120,14 +124,23 @@ def restart_service(service_name, process):
     Restart the process using systemctl if possible (otherwise kill the
     process)
     :param service_name:
-    :return:
+    :param process:
     """
-    res, exc = command("systemctl", args=["restart", service_name],
-                       paths=["/usr/bin", "/bin"])
+    res, exc = run_command("systemctl", args=["restart", service_name],
+                           paths=["/usr/bin", "/bin"])
 
     if exc and isinstance(exc, OSError):
         _log.warning("No systemctl binary - killing process %s", process)
         process.kill()
+
+
+def start_service(service_name):
+    """
+    Start the process using systemctl if possible.
+    :param service_name:
+    """
+    run_command("systemctl", args=["start", service_name],
+                paths=["/usr/bin", "/bin"])
 
 
 def ensure_dir(directory):
@@ -139,7 +152,7 @@ def ensure_dir(directory):
         os.makedirs(directory)
 
 
-def find_process(exe_re):
+def find_process(exe_re, parms_re):
     """
     Find the unique process specified by the executable and command line
     regexes.
@@ -147,14 +160,28 @@ def find_process(exe_re):
     :param exe_re: Regex used to search for a particular executable in the
     process list.  The exe regex is compared against the full command line
     invocation - so executable plus arguments.
+    :param parms_re:
     :return: The matching process, or None if no process is found.  If
     multiple matching processes are found, this indicates an error with the
     regex, and the script will terminate.
     """
-    processes = [
-        p for p in psutil.process_iter()
-        if exe_re.match(" ".join(p.cmdline()))
-    ]
+    processes = []
+    for p in psutil.process_iter():
+        cmds = p.cmdline()
+        if not cmds:
+            continue
+        if not exe_re.match(cmds[0]):
+            continue
+        if not parms_re:
+            processes.append(p)
+            continue
+        parms = cmds[1:]
+        match = any(parms_re.match(parm) for parm in parms)
+        if match:
+            processes.append(p)
+            continue
+
+    _log.debug("Matched: %s", processes)
 
     # Multiple processes suggests our query is not correct.
     if len(processes) > 1:
@@ -164,7 +191,7 @@ def find_process(exe_re):
     return processes[0] if processes else None
 
 
-def wait_for_process(exe_re, max_wait, stability_time=0,
+def wait_for_process(exe_re, parms_re, max_wait, stability_time=0,
                      fail_if_not_found=True):
     """
     Locate the specified process, waiting a specified max time before giving
@@ -173,18 +200,21 @@ def wait_for_process(exe_re, max_wait, stability_time=0,
     :param exe_re: Regex used to search for a particular executable in the
     process list.  The exe regex is compared against the full command line
     invocation - so executable plus arguments.
+    :param parms_re:
     :param max_wait:  The maximum time to wait for the process to appear.
     :param stability_time:  The time to wait to check for process stability.
+    :param fail_if_not_found: Fail the request if the process is not found
+    within the time limit.
     :return: The matching process, or None if no process is found.  If
     multiple matching processes are found, this indicates an error with the
     regex, and the script will terminate.  If no processes are found, this
     also indicates a problem and the script terminates.
     """
     start = time.time()
-    process = find_process(exe_re)
+    process = find_process(exe_re, parms_re)
     while not process and time.time() < start + max_wait:
         time.sleep(1)
-        process = find_process(exe_re)
+        process = find_process(exe_re, parms_re)
 
     if not process:
         _log.warning("Process not found within timeout: %s", exe_re)
@@ -198,7 +228,7 @@ def wait_for_process(exe_re, max_wait, stability_time=0,
     if stability_time:
         _log.debug("Waiting to check process stability")
         time.sleep(stability_time)
-        new_process = find_process(exe_re)
+        new_process = find_process(exe_re, parms_re)
         if not new_process:
             _log.error("Process terminated unexpectedly: %s", process)
             sys.exit(1)
@@ -323,12 +353,12 @@ def get_host_info():
     _log.info("Gathering host information.")
 
     # Get Architecture
-    arch, _ = command("uname", args=["-m"], paths=["/usr/bin", "/bin"])
+    arch, _ = run_command("uname", args=["-m"], paths=["/usr/bin", "/bin"])
     _log.info("Arch: %s", arch)
 
     # Get Mesos Version
-    raw_mesos_version, _ = command("mesos-slave", args=["--version"],
-                       paths=["/opt/mesosphere/bin"])
+    raw_mesos_version, _ = run_command("mesos-slave", args=["--version"],
+                                       paths=["/opt/mesosphere/bin"])
     mesos_version = raw_mesos_version.split(" ")[1] if raw_mesos_version else None
     _log.info("Mesos Version: %s" % mesos_version)
 
@@ -345,7 +375,7 @@ def get_host_info():
         _log.error("Couldn't find release-info file: %s", DISTRO_INFO_FILE)
 
     _log.info("Distro: %s", distro)
-    return (mesos_version, distro, arch)
+    return mesos_version, distro, arch
 
 
 def cmd_install_netmodules():
@@ -363,7 +393,9 @@ def cmd_install_netmodules():
     # process - if not there is not much we can do here.
     if not install_config:
         _log.debug("Have not started installation yet")
+        # noinspection PyTypeChecker
         agent_process = wait_for_process(AGENT_EXE_RE,
+                                         AGENT_EXE_PARMS_RE,
                                          MAX_TIME_FOR_AGENT_RESTART,
                                          fail_if_not_found=False)
         if not agent_process:
@@ -458,7 +490,9 @@ def cmd_install_netmodules():
     # We use this to track when the agent has restarted with our new config.
     if not install_config.get("agent-created"):
         _log.debug("Store agent creation time")
+        # noinspection PyTypeChecker
         agent_process = wait_for_process(AGENT_EXE_RE,
+                                         AGENT_EXE_PARMS_RE,
                                          MAX_TIME_FOR_AGENT_RESTART)
         install_config["agent-created"] = str(agent_process.create_time())
         store_config(NETMODULES_INSTALL_CONFIG, install_config)
@@ -466,7 +500,9 @@ def cmd_install_netmodules():
     # Check the agent process creation time to see if it has been restarted
     # since the config was updated.
     _log.debug("Restart agent if not using updated config")
+    # noinspection PyTypeChecker
     agent_process = wait_for_process(AGENT_EXE_RE,
+                                     AGENT_EXE_PARMS_RE,
                                      MAX_TIME_FOR_AGENT_RESTART,
                                      PROCESS_STABILITY_TIME)
     if install_config["agent-created"] == str(agent_process.create_time()):
@@ -501,6 +537,7 @@ def cmd_install_docker_cluster_store():
     if not install_config:
         _log.debug("Have not started installation yet")
         daemon_process = wait_for_process(DOCKER_DAEMON_EXE_RE,
+                                          DOCKER_DAEMON_PARMS_RE,
                                           MAX_TIME_FOR_DOCKER_RESTART,
                                           fail_if_not_found=False)
         if not daemon_process:
@@ -531,15 +568,30 @@ def cmd_install_docker_cluster_store():
     if not install_config.get("docker-created"):
         _log.debug("Store docker daemon creation time")
         daemon_process = wait_for_process(DOCKER_DAEMON_EXE_RE,
+                                          DOCKER_DAEMON_PARMS_RE,
                                           MAX_TIME_FOR_DOCKER_RESTART)
         install_config["docker-created"] = str(daemon_process.create_time())
         store_config(DOCKER_INSTALL_CONFIG, install_config)
 
-    # If Docker needs restarting, do that now.
-    _log.debug("Restart docker if not using updated config")
+    # Check the Docker daemon is running.
     daemon_process = wait_for_process(DOCKER_DAEMON_EXE_RE,
+                                      DOCKER_DAEMON_PARMS_RE,
                                       MAX_TIME_FOR_DOCKER_RESTART,
-                                      PROCESS_STABILITY_TIME)
+                                      PROCESS_STABILITY_TIME,
+                                      fail_if_not_found=False)
+    if not daemon_process and \
+       not install_config.get("docker-attempted-start"):
+        # No Docker daemon process - it must have failed to come back.
+        # We haven't tried a systemctl start so try one now.
+        _log.error("Docker process failed after restart - attempt start")
+        start_service("docker")
+        install_config["docker-attempted-restart"] = True
+        store_config(DOCKER_INSTALL_CONFIG, install_config)
+        daemon_process = wait_for_process(DOCKER_DAEMON_EXE_RE,
+                                          DOCKER_DAEMON_PARMS_RE,
+                                          MAX_TIME_FOR_DOCKER_RESTART,
+                                          PROCESS_STABILITY_TIME)
+
     if install_config["docker-created"] == str(daemon_process.create_time()):
         # Docker has not been restarted, so restart it now.  This will cause
         # the task to fail (but sys.exit(1) to make sure).  The task will be
@@ -602,4 +654,3 @@ if __name__ == "__main__":
         print "Unexpected action: %s" % action
         sys.exit(1)
     sys.exit(0)
-
