@@ -83,7 +83,7 @@ def command(command, args=[], paths=[]):
         return None, e
     else:
         _log.debug("Command output: %s", res)
-        return res, None
+        return res.strip(), None
 
 
 def docker_version_supported():
@@ -311,6 +311,7 @@ def move_file_if_missing(from_file, to_file):
     os.rename(tmp_to_file, to_file)
     return True
 
+
 def get_host_info():
     """
     Gather information from the host OS.
@@ -321,11 +322,13 @@ def get_host_info():
     _log.info("Gathering host information.")
 
     # Get Architecture
-    arch = subprocess.check_output(["uname", "-p"]).strip()
+    arch, exc = command("uname", args=["-p"], paths=["/usr/bin", "/bin"])
     _log.info("Arch: %s", arch)
 
     # Get Mesos Version
-    mesos_version = subprocess.check_output(["/opt/mesosphere/bin/mesos-slave","--version"]).strip().split(" ")[1]
+    raw, exc = command("mesos-slave", args=["--version"],
+                       paths=["/opt/mesosphere/bin"])
+    mesos_version = raw.split(" ")[1] if raw else None
     _log.info("Mesos Version: %s" % mesos_version)
 
     # Get Distribution
@@ -343,6 +346,7 @@ def get_host_info():
     _log.info("Distro: %s", distro)
 
     return (mesos_version, distro, arch)
+
 
 def cmd_install_netmodules():
     """
