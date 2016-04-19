@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import socket
+import subprocess
 import sys
 import time
 from collections import OrderedDict
@@ -33,13 +34,16 @@ NETMODULES_INSTALL_CONFIG= INSTALLER_CONFIG_DIR + "/netmodules"
 DOCKER_INSTALL_CONFIG = INSTALLER_CONFIG_DIR + "/docker"
 
 # Docker information for a standard Docker install.
-DOCKER_DAEMON_EXE_RE = re.compile("(.*/)?docker\s+(--)?daemon(\s+.*)?")
+DOCKER_DAEMON_EXE_RE = re.compile(r"(.*/)?docker\s+(--)?daemon(\s+.*)?")
 DOCKER_DAEMON_CONFIG = "/etc/docker/daemon.json"
 
 # Docker information for a standard Docker install.
-AGENT_EXE_RE = re.compile("(.*/)?mesos-slave(\s+.*)?")
+AGENT_EXE_RE = re.compile(r"(.*/)?mesos-slave(\s+.*)?")
 AGENT_CONFIG = "/opt/mesosphere/etc/mesos-slave-common"
 AGENT_MODULES_CONFIG = "/opt/mesosphere/etc/mesos-slave-modules.json"
+
+# Docker version regex
+DOCKER_VERSION_RE = re.compile(r"Docker version (\d+)\.(\d+)\.(\d+)^\d.*")
 
 # Fixed address for our etcd proxy.
 CLUSTER_STORE_ETCD_PROXY = "etcd://127.0.0.1:2379"
@@ -50,6 +54,75 @@ MAX_TIME_FOR_AGENT_RESTART = 30
 
 # Time to wait to check that a process is stable.
 PROCESS_STABILITY_TIME = 5
+
+
+def command(command, args=[], paths=[]):
+    """
+    Run a command on the host.
+    :return: A tuple of (output, exception).  Either one of output or exception
+    will be None.
+    """
+    # Locate the command from the possible list of paths (if supplied).
+    for path in paths:
+        new_command = os.path.join(path, command)
+        if os.path.exists(new_command):
+            command = new_command
+    _log.debug("Executing command: %s", command)
+
+    try:
+        res = subprocess.check_output([command] + args)
+    except subprocess.CalledProcessError, e:
+        _log.exception("CalledProcessError running command: %s", e)
+        return None, e
+    except OSError, e:
+        _log.exception("OSError running command: %s", e)
+        return None, e
+    else:
+        _log.debug("Command output: %s", res)
+        return res, None
+
+
+def docker_version_supported():
+    """
+    Check if the host has a version of Docker that is supported.
+    :return: True if supported.
+    """
+    res, exc = command("docker", args=["--version"],
+                       paths=["/usr/bin", "/bin"])
+
+    if exc:
+        _log.warning("Unable to query Docker version")
+        return False
+
+    version_match = DOCKER_VERSION_RE.match(res)
+    if not version_match:
+        _log.warning("Docker version output unexpected format")
+        return False
+
+    vmajor = int(version_match.group(1))
+    vminor = int(version_match.group(2))
+    vpatch = int(version_match.group(3))
+    if (vmajor, vminor, vpatch) < (1, 9, 0):
+        _log.warning("Docker version is not supported")
+        return False
+
+    _log.debug("Docker version is supported")
+    return True
+
+
+def restart_service(service_name, process):
+    """
+    Restart the process using systemctl if possible (otherwise kill the
+    process)
+    :param service_name:
+    :return:
+    """
+    res, exc = command("systemctl", args=["restart", service_name],
+                       paths=["/usr/bin", "/bin"])
+
+    if exc and isinstance(exc, OSError):
+        _log.warning("No systemctl binary - killing process %s", process)
+        process.kill()
 
 
 def ensure_dir(directory):
@@ -88,7 +161,8 @@ def find_process(exe_re):
     return processes[0] if processes else None
 
 
-def wait_for_process(exe_re, max_wait, stability_time=0):
+def wait_for_process(exe_re, max_wait, stability_time=0,
+                     fail_if_not_found=True):
     """
     Locate the specified process, waiting a specified max time before giving
     up.  If the process can not be found within the time limit, the script
@@ -110,8 +184,13 @@ def wait_for_process(exe_re, max_wait, stability_time=0):
         process = find_process(exe_re)
 
     if not process:
-        _log.error("Process not found within timeout: %s", exe_re)
-        sys.exit(1)
+        _log.warning("Process not found within timeout: %s", exe_re)
+        if fail_if_not_found:
+            _log.error("Expecting process to be found, it wasn't")
+            sys.exit(1)
+        else:
+            _log.debug("Returning no process")
+            return None
 
     if stability_time:
         _log.debug("Waiting to check process stability")
@@ -242,6 +321,17 @@ def cmd_install_netmodules():
     modules_config = load_config(AGENT_MODULES_CONFIG)
     mesos_props = load_property_file(AGENT_CONFIG)
 
+    # Before starting the install, check that we are able to locate the agent
+    # process - if not there is not much we can do here.
+    if not install_config:
+        _log.debug("Have not started installation yet")
+        agent_process = wait_for_process(AGENT_EXE_RE,
+                                         MAX_TIME_FOR_AGENT_RESTART,
+                                         fail_if_not_found=False)
+        if not agent_process:
+            _log.info("Cannot find agent process - do not update config")
+            return
+
     libraries = modules_config.setdefault("libraries", [])
     files = [library.get("file") for library in libraries]
     if "/opt/mesosphere/lib/libmesos_network_isolator.so" not in files:
@@ -330,7 +420,7 @@ def cmd_install_netmodules():
         # the task to fail (but sys.exit(1) to make sure).  The task will be
         # relaunched, and next time will miss this branch and succeed.
         _log.warning("Restarting agent process: %s", agent_process)
-        agent_process.kill()
+        restart_service("dcos-mesos-slave", agent_process)
         sys.exit(1)
 
     _log.debug("Agent was restarted and is stable since config was updated")
@@ -342,10 +432,26 @@ def cmd_install_docker_cluster_store():
     Install Docker configuration for Docker multi-host networking.  A successful
     completion of the task indicates successful installation.
     """
+    # Check if the Docker version is supported.  If not, just finish the task.
+    if not docker_version_supported():
+        _log.debug("Docker version is not supported - finish task")
+        return
+
     # Load the current Calico install info for Docker, and the current Docker
     # daemon configuration.
     install_config = load_config(DOCKER_INSTALL_CONFIG)
     daemon_config = load_config(DOCKER_DAEMON_CONFIG)
+
+    # Before starting the install, check that we are able to locate the Docker
+    # process.  If necessary wait.
+    if not install_config:
+        _log.debug("Have not started installation yet")
+        daemon_process = wait_for_process(DOCKER_DAEMON_EXE_RE,
+                                          MAX_TIME_FOR_DOCKER_RESTART,
+                                          fail_if_not_found=False)
+        if not daemon_process:
+            _log.info("Docker daemon is not running - do not update config")
+            return
 
     if "cluster-store" not in daemon_config:
         # Before updating the config flag that config is updated, but don't yet
@@ -385,7 +491,7 @@ def cmd_install_docker_cluster_store():
         # the task to fail (but sys.exit(1) to make sure).  The task will be
         # relaunched, and next time will miss this branch and succeed.
         _log.warning("Restarting Docker process: %s", daemon_process)
-        daemon_process.kill()
+        restart_service("docker", daemon_process)
         sys.exit(1)
 
     _log.debug("Docker was restarted and is stable since adding cluster store")

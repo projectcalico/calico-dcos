@@ -50,6 +50,7 @@ _log = logging.getLogger(__name__)
 # Instantiate a ZooKeeper instance for use by the Framework.
 zk = ZkDatastore()
 
+
 class Agent(object):
     def __init__(self, scheduler, agent_id):
         self.scheduler = scheduler
@@ -368,7 +369,7 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
             return True
         num_restarting = sum(1 for a in self.agents.values() if a.is_restarting())
         can_restart = num_restarting < config.max_concurrent_restarts
-        _log.debug("Can restart agent: ", can_restart)
+        _log.debug("Can restart agent: %s", can_restart)
         return can_restart
 
     def get_agent(self, agent_id):
