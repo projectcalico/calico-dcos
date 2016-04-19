@@ -33,11 +33,11 @@ NETMODULES_INSTALL_CONFIG= INSTALLER_CONFIG_DIR + "/netmodules"
 DOCKER_INSTALL_CONFIG = INSTALLER_CONFIG_DIR + "/docker"
 
 # Docker information for a standard Docker install.
-DOCKER_DAEMON_EXE_RE = re.compile("/usr/bin/docker\s+daemon\s+.*")
+DOCKER_DAEMON_EXE_RE = re.compile("(.*/)?docker\s+(--)?daemon(\s+.*)?")
 DOCKER_DAEMON_CONFIG = "/etc/docker/daemon.json"
 
 # Docker information for a standard Docker install.
-AGENT_EXE_RE = re.compile("/opt/mesosphere.*/bin/mesos-slave.*")
+AGENT_EXE_RE = re.compile("(.*/)?mesos-slave(\s+.*)?")
 AGENT_CONFIG = "/opt/mesosphere/etc/mesos-slave-common"
 AGENT_MODULES_CONFIG = "/opt/mesosphere/etc/mesos-slave-modules.json"
 
@@ -77,6 +77,8 @@ def find_process(exe_re):
         p for p in psutil.process_iter()
         if exe_re.match(" ".join(p.cmdline()))
     ]
+    for p in psutil.process_iter():
+        _log.info(p.cmdline())
 
     # Multiple processes suggests our query is not correct.
     if len(processes) > 1:
