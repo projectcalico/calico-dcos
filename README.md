@@ -11,7 +11,7 @@ This repo contains the implementation of the Calico Universe package for
 DCOS.
 
 If you would like to install Calico on your DCOS cluster, please refer 
-to the [DCOS Calico Universe installation]() guide.  This guide describes
+to the [DCOS Calico Universe installation](https://github.com/projectcalico/calico-containers/blob/master/docs/mesos/DCOS.md) guide.  This guide describes
 how to install Calico on your DCOS deployment and provides details for
 using Calico in that deployment.
 
@@ -39,6 +39,9 @@ The Calico framework performs the following operations:
    the new config.  Restarts are rate limited with a configurable option
    to say how many agents may be updated at the same time.
 -  Runs calico-node and calico-libnetwork container images on each node.
+ 
+The framework also runs a webserver that is used for displaying 
+service status.
 
 
 [![Analytics](https://calico-ga-beacon.appspot.com/UA-52125893-3/calico-dcos/README.md?pixel)](https://github.com/igrigorik/ga-beacon)
