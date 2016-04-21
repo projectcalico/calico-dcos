@@ -438,7 +438,7 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         :param driver:
         :param slave_id:
         """
-        agent = self.get_agent(slave_id)
+        agent = self.get_agent(slave_id.value)
         agent.agent_syncd = None
 
     def offerRescinded(self, driver, offer_id):
