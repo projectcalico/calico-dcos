@@ -39,6 +39,7 @@ class Task(object):
         self.updated = kwargs.get("updated") or "NA"
         self.task_id = kwargs.get("task_id") or self.new_task_id()
         self.hash = kwargs.get("hash") or self.hash
+        self.role = kwargs.get("role") or "*"
         self.healthy = True
         self.clean = True
         """
@@ -81,11 +82,13 @@ class Task(object):
         cpus.name = "cpus"
         cpus.type = mesos_pb2.Value.SCALAR
         cpus.scalar.value = self.cpus
+        cpus.role = self.role
 
         mem = task.resources.add()
         mem.name = "mem"
         mem.type = mesos_pb2.Value.SCALAR
         mem.scalar.value = self.mem
+        mem.role = self.role
 
         return task
 
@@ -129,7 +132,8 @@ class Task(object):
             "state": self.state,
             "created": self.created,
             "updated": self.updated,
-            "hash": self.hash
+            "hash": self.hash,
+            "role": self.role
         }
         return task_dict
 
