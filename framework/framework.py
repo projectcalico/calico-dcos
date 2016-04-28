@@ -154,7 +154,8 @@ class Agent(object):
                 _log.debug("Task needs scheduling")
                 if self.task_can_be_offered(task_class, offer):
                     _log.debug("Task can be offered")
-                    return self.new_task(task_class)
+                    role = self.get_role(offer)
+                    return self.new_task(task_class, role=role)
                 else:
                     _log.debug("Task cannot be offered - wait")
                     return None
@@ -165,6 +166,25 @@ class Agent(object):
 
         _log.debug("All tasks are running")
         return None
+
+    def get_role(self, offer):
+        """
+        Helper method to disect an offer and determine which role the resources
+        belong to.
+
+        Note: This method (and this framework) make the following assumptions
+        about role assignments in DC/OS:
+        - Only 2 roles exist: "*", and "public_slave"
+        - A (public) slave offering "public_slave" resources will not offer enough "*"
+        resources to ever launch a task.
+
+        :return: A string representation of the role. This can be "*" or a string.
+        """
+        # If we find anything besides "*", use it as the role. Otherwise, just use "*"
+        for resource in offer.resources:
+            if resource.role != "*":
+                return resource.role
+        return "*"
 
     def trigger_resync(self, driver):
         """
@@ -459,6 +479,7 @@ def launch_framework():
     framework.name = "calico"
     framework.principal = "calico"
     framework.failover_timeout = 604800
+    framework.role = "slave_public"
     framework.webui_url = config.webserver_url
 
     old_id = zk.get_framework_id()
