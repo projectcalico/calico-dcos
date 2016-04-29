@@ -378,10 +378,12 @@ def get_host_info():
     return mesos_version, distro, arch
 
 
-def cmd_install_netmodules():
+def cmd_install_netmodules(public_slave=False):
     """
     Install netmodules and Calico plugin.  A successful completion of the task
-    indicates successful installation.
+    indicates successful installation
+
+    :param public_slave: Flag indicating if this is a public slave.
     """
     # Load the current Calico install info for Docker, and the current Docker
     # daemon configuration.
@@ -510,7 +512,10 @@ def cmd_install_netmodules():
         # the task to fail (but sys.exit(1) to make sure).  The task will be
         # relaunched, and next time will miss this branch and succeed.
         _log.warning("Restarting agent process: %s", agent_process)
-        restart_service("dcos-mesos-slave", agent_process)
+        if public_slave:
+            restart_service("dcos-mesos-slave-public", agent_process)
+        else:
+            restart_service("dcos-mesos-slave", agent_process)
         sys.exit(1)
 
     _log.debug("Agent was restarted and is stable since config was updated")
@@ -645,7 +650,8 @@ if __name__ == "__main__":
     initialise_logging()
     action = sys.argv[1]
     if action == "netmodules":
-        cmd_install_netmodules()
+        public_slave = "--public" in sys.argv
+        cmd_install_netmodules(public_slave=public_slave)
     elif action == "docker":
         cmd_install_docker_cluster_store()
     elif action == "ip":
