@@ -271,6 +271,9 @@ class TaskInstallNetmodules(Task):
     def as_new_mesos_task(self, agent_id):
         task = self.new_default_task(agent_id)
         task.command.value = "./installer netmodules"
+        if self.role == "slave_public":
+            task.command.value += " --public"
+
         task.command.user = "root"
 
         # Download the Netmodules .so
