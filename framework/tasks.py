@@ -358,6 +358,7 @@ class TaskRunCalicoLibnetwork(Task):
 
         task.container.type = mesos_pb2.ContainerInfo.DOCKER
         task.container.docker.image = config.libnetwork_img
+        task.container.docker.privileged = True
         task.command.shell = False
 
         # Volume mount in /run/docker/plugins
