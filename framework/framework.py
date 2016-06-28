@@ -466,6 +466,19 @@ class CalicoInstallerScheduler(mesos.interface.Scheduler):
         # offer to speed things up, but I don't believe it's strictly necessary.
         _log.info("Offer rescinded for offer ID %s", offer_id)
 
+    def error(self, driver, message):
+        """
+        Invoked when there is an unrecoverable error in the scheduler.
+        :param driver:
+        :param message:
+        :return:
+        """
+        _log.error("Encountered error: %s", message)
+        if message == "Framework has been removed":
+            _log.error("Error: Unable to register with the framework ID stored in zk."
+                       "This commonly happens when the Calico package is removed and then re-added."
+                       "Wiping calico's ZK data so the next restart can get a new ID.")
+            zk.remove_calico()
 
 def launch_framework():
     """
