@@ -15,7 +15,6 @@
 # limitations under the License.
 import json
 import threading
-
 from flask import Flask
 
 from config import config
@@ -38,6 +37,7 @@ def launch_webserver():
         "port": config.webserver_bind_port
     }
     t = threading.Thread(target=app.run, kwargs=kwargs)
+    t.daemon = True
     t.start()
     return t
 

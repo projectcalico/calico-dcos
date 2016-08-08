@@ -96,3 +96,9 @@ class ZkDatastore(object):
                 tasks_dict = json.loads(tasks_str)
                 agent_task_dicts[agent_id] = tasks_dict
         return agent_task_dicts
+
+    def remove_calico(self):
+        if config.zk_persist_dir == "/":
+            _log.warning("Cowardly refusing to remove zookeeper root")
+        else:
+            self._zk.delete(config.zk_persist_dir, recursive=True)

@@ -38,7 +38,7 @@ function buildNodeRow(nodeID, node) {
   nodeStatus = -1;
   libnetworkStatus = -1;
   etcdProxyStatus = -1;
-  netmodulesInstallStatus = -1;
+  cniInstallStatus = -1;
   dockerInstallStatus = -1;
 
   if ("TaskRunCalicoNode" in node)
@@ -47,8 +47,8 @@ function buildNodeRow(nodeID, node) {
     libnetworkStatus = node["TaskRunCalicoLibnetwork"]["state"]
   if ("TaskRunEtcdProxy" in node)
     etcdProxyStatus = node["TaskRunEtcdProxy"]["state"]
-  if ("TaskInstallNetmodules" in node)
-    netmodulesInstallStatus = node["TaskInstallNetmodules"]["state"]
+  if ("TaskInstallCalicoCNI" in node)
+    cniInstallStatus = node["TaskInstallCalicoCNI"]["state"]
   if ("TaskInstallDockerClusterStore" in node)
     dockerInstallStatus = node["TaskInstallDockerClusterStore"]["state"]
 
@@ -58,7 +58,7 @@ function buildNodeRow(nodeID, node) {
       "<td>" + statusIdToString(nodeStatus) + "</td>" +
       "<td>" + statusIdToString(libnetworkStatus) + "</td>" +
       "<td>" + statusIdToString(etcdProxyStatus) + "</td>" +
-      "<td>" + statusIdToString(netmodulesInstallStatus) + "</td>" +
+      "<td>" + statusIdToString(cniInstallStatus) + "</td>" +
       "<td>" + statusIdToString(dockerInstallStatus) + "</td>" +
     "</tr>"
   );
@@ -113,7 +113,7 @@ $(document).ready(function() {
             <th>Calico networking</th>
             <th>Docker network driver</th>
             <th>Etcd Proxy</th>
-            <th>Netmodules Install</th>
+            <th>CNI Install</th>
             <th>Docker Install</th>
           </tr>
         </thead>
