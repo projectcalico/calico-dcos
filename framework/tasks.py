@@ -16,6 +16,7 @@
 import hashlib
 import logging
 import uuid
+import json
 from datetime import datetime
 
 from mesos.interface import mesos_pb2
@@ -274,20 +275,14 @@ class TaskInstallCalicoCNI(Task):
 
     def as_new_mesos_task(self, agent_id):
         task = self.new_default_task(agent_id)
-        calico_conf = {
-            "name": "calico",
-            "type": "calico",
-            "ipam": {
-                "type": "calico-ipam"
-            }
-        }
+        calico_conf = '{"name": "calico", "type": "calico", "ipam": { "type": "calico-ipam"}}'
 
         commands = ["mkdir -p %s" % config.cni_plugins_dir,
                     "cp -f ./calico %s/calico" % config.cni_plugins_dir,
                     "cp -f ./calico %s/calico-ipam" % config.cni_plugins_dir,
-                    "echo %s | tee %s/calico.conf" % (json.dumps(calico_conf), config.cni_config_dir)]
+                    "echo '%s' | tee %s/calico.conf" % (calico_conf, config.cni_config_dir)]
 
-        task.command.value = commands.join(" && ")
+        task.command.value = ' && '.join(commands)
         task.command.user = "root"
 
         # Download the Calico CNI Binary
