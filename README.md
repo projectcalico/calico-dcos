@@ -7,22 +7,35 @@
 <!--- end of master only -->
 
 # Calico DCOS
-This repo contains the implementation of the Calico Universe package for
+This repo contains the source code implementation of the Calico Universe package for
 DCOS.
 
-If you would like to install Calico on your DCOS cluster, please refer 
-to the [DCOS Calico Universe installation](https://github.com/projectcalico/calico-containers/blob/master/docs/mesos/DCOS.md) guide.  This guide describes
-how to install Calico on your DCOS deployment and provides details for
-using Calico in that deployment.
+If you would simply like to install Calico on your DCOS cluster, please refer 
+to the [DCOS Calico Universe installation](https://github.com/projectcalico/calico-containers/blob/master/docs/mesos/DCOS.md) guide, which describes
+how to install Calico on your DCOS cluster and provides details for
+using Calico.
+
+Below are instructions to build the Calico Universe plugin from source.
+
+### Build
+
+Follow the instructions for installing Docker https://docs.docker.com/installation/.
+
+    make
+    docker tag calico/calico-dcos <dockerhub-acct>/calico-dcos:<my-version>
+    docker images
+    docker push <dockerhub-acct>/calico-dcos:<my-version>
 
 ### Nitty gritty
 
-This repo contains a Mesos framework and installation scripts used for
-deploying Calico in an existing Mesos cluster.  The DCOS Universe package
-for Calico is essentially a wrapper for this framework, providing an
-easy to operate user interface.  There is no fundamental reason why this
-framework has to be used within the Universe infrastructure, and it 
-should be possible to use this on an existing Mesos deployment.
+The DCOS Universe Calico package exposes an easy to operate Browser
+user interface and Calico install, within the DCOS Universe Web GUI.
+For more information - https://github.com/mesosphere/universe
+
+This repo contains Universe scripts used for deploying Calico in an existing
+DCOS cluster.   The DCOS Universe Calico package is a wrapper for a Mesos framework
+and installation scripts used for an existing Mesos cluster.  So, alternatively, it 
+should be possible to use this framework code on an existing Mesos deployment.
 
 The Calico framework performs the following operations:
 -  Runs an etcd proxy on each agent, so etcd is accessible from port
