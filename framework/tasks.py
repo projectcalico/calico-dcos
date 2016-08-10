@@ -16,6 +16,7 @@
 import hashlib
 import logging
 import uuid
+import json
 from datetime import datetime
 
 from mesos.interface import mesos_pb2
@@ -223,6 +224,10 @@ class TaskRunEtcdProxy(Task):
         return task
 
 
+class TaskInitialConfig(Task):
+    pass
+
+
 class TaskInstallDockerClusterStore(Task):
     """
     Task to install Docker configuration for Docker multi-host networking.
@@ -257,55 +262,37 @@ class TaskInstallDockerClusterStore(Task):
         return config.allow_docker_update
 
 
-class TaskInstallNetmodules(Task):
+class TaskInstallCalicoCNI(Task):
     """
     Task to install netmodules and Calico plugin.
     """
     hash = 0
     persistent = False
-    restarts = True
+    restarts = False
     cpus = config.cpu_limit_install
     mem = config.mem_limit_install
-    description = "Calico: install netmodules and plugin"
+    description = "Calico: install CNI plugin"
 
     def as_new_mesos_task(self, agent_id):
         task = self.new_default_task(agent_id)
-        task.command.value = "./installer netmodules"
-        if self.role == "slave_public":
-            task.command.value += " --public"
+        calico_conf = '{"name": "calico", "type": "calico", "ipam": { "type": "calico-ipam"}}'
 
+        commands = ["mkdir -p %s" % config.cni_plugins_dir,
+                    "cp -f ./calico %s/calico" % config.cni_plugins_dir,
+                    "cp -f ./calico %s/calico-ipam" % config.cni_plugins_dir,
+                    "echo '%s' | tee %s/calico.conf" % (calico_conf, config.cni_config_dir)]
+
+        task.command.value = ' && '.join(commands)
         task.command.user = "root"
 
-        # Download the Netmodules .so
+        # Download the Calico CNI Binary
         uri = task.command.uris.add()
-        uri.value = config.netmodules_url
-        uri.executable = False
-        uri.cache = True
-        uri.extract = True
-
-        # Download calico_mesos
-        uri = task.command.uris.add()
-        uri.value = config.calico_mesos_url
+        uri.value = config.calico_cni_binary_url
         uri.executable = True
         uri.cache = True
-
-        # Download the installer binary
-        uri = task.command.uris.add()
-        uri.value = config.installer_url
-        uri.executable = True
-        uri.cache = USE_CACHED_INSTALLER
+        uri.extract = False
 
         return task
-
-    @classmethod
-    def allowed(cls):
-        """
-        Whether this task is allowed.    There is a configuration option to
-        prevent an Agent restart - in which case this step should be skipped.
-        :return: True
-        """
-        _log.debug("Allow agent update: %s", config.allow_agent_update)
-        return config.allow_agent_update
 
 
 class TaskRunCalicoNode(Task):
@@ -378,7 +365,7 @@ class TaskRunCalicoLibnetwork(Task):
 TASK_ORDER = [
     TaskRunEtcdProxy,
     TaskInstallDockerClusterStore,
-    TaskInstallNetmodules,
+    TaskInstallCalicoCNI,
     TaskRunCalicoNode,
     TaskRunCalicoLibnetwork
 ]

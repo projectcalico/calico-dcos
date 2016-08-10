@@ -40,13 +40,14 @@ class Config(object):
         self.mem_limit_libnetwork = int(self.getenv("CALICO_MEM_LIMIT_LIBNETWORK"))
 
         self.installer_url = self.getenv("CALICO_INSTALLER_URL")
-        self.calico_mesos_url = self.getenv("CALICO_MESOS_PLUGIN")
-        self.netmodules_url = self.getenv("NETMODULES_URL")
+        self.calico_cni_binary_url = self.getenv("CALICO_CNI_BINARY_URL")
 
         self.etcd_binary_url = self.getenv("ETCD_BINARY_URL")
         self.etcd_discovery = self.getenv("ETCD_SRV")
 
         self.mesos_master = self.getenv("MESOS_MASTER")
+        self.cni_plugins_dir = self.getenv("MESOS_CNI_PLUGINS_DIR")
+        self.cni_config_dir = self.getenv("MESOS_CNI_CONFIG_DIR")
 
         self.webserver_bind_ip = self.getenv("LIBPROCESS_IP")
         self.webserver_bind_port = self.getenv("PORT0")
