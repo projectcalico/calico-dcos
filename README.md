@@ -15,17 +15,6 @@ to the [DCOS Calico Universe installation](https://github.com/projectcalico/cali
 how to install Calico on your DCOS cluster and provides details for
 using Calico.
 
-Below are instructions to build the Calico Universe plugin from source.
-
-### Build
-
-Follow the instructions for installing Docker https://docs.docker.com/installation/.
-
-    make
-    docker tag calico/calico-dcos <dockerhub-acct>/calico-dcos:<my-version>
-    docker images
-    docker push <dockerhub-acct>/calico-dcos:<my-version>
-
 ### Nitty gritty
 
 The DCOS Universe Calico package exposes an easy to operate Browser
