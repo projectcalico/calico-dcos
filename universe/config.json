@@ -3,6 +3,16 @@
     "calico": {
       "description": "Calico specific configuration properties.",
       "properties": {
+        "override-node-image": {
+          "type": "string",
+          "description": "Override the node image specified in resources.json",
+          "default": ""
+        },
+        "override-installer-url": {
+          "type": "string",
+          "description": "Override the URL for the installer binary.",
+          "default": ""
+        },
         "framework-name": {
           "type": "string",
           "description": "The name of the framework.",

@@ -15,7 +15,7 @@
   "instances": 1,
   "env": {
     "CALICO_CALICOCTL_URL": "{{resource.assets.uris.calicoctl}}",
-    "CALICO_NODE_IMG": "{{resource.assets.container.docker.calico-node}}",
+    "CALICO_NODE_IMG": {{#calico.override-node-image?}}"{{calico.override-node-image}}"{{/calico.override-node-image}}{{^calico.override-node-image?}}"{{resource.assets.container.docker.calico-node}}"{{/calico.override-node-image}},
     "CALICO_LIBNETWORK_IMG": "{{resource.assets.container.docker.calico-libnetwork}}",
     {{#calico.allow-docker-update}}"CALICO_ALLOW_DOCKER_UPDATE": "true",{{/calico.allow-docker-update}}
     "CALICO_MAX_CONCURRENT_RESTARTS": "{{calico.max-concurrent-restarts}}",
@@ -29,7 +29,7 @@
     "CALICO_CPU_LIMIT_LIBNETWORK": "{{calico.cpu-limit-libnetwork}}",
     "CALICO_MEM_LIMIT_LIBNETWORK": "{{calico.mem-limit-libnetwork}}",
     "CALICO_STATUS_DNS": "{{calico.status-dns}}",
-    "CALICO_INSTALLER_URL": "{{resource.assets.uris.calico-installer}}",
+    "CALICO_INSTALLER_URL": {{#calico.override-installer-url?}}"{{calico.override-installer-url}}"{{/calico.override-installer-url}}{{^calico.override-installer-url}}"{{resource.assets.uris.calico-installer}}"{{/calico.override-installer-url}},
     "ETCD_SRV": "{{etcd.etcd-discovery-url}}",
     "ETCD_BINARY_URL": "{{resource.assets.uris.etcd}}",
     "MESOS_MASTER": "{{mesos.master}}",

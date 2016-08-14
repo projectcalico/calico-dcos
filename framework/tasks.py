@@ -309,7 +309,9 @@ class TaskRunCalicoNode(Task):
     def as_new_mesos_task(self, agent_id):
         cmd_ip = "$(./installer ip %s)" % config.zk_hosts
         task = self.new_default_task(agent_id)
-        task.command.value = "./calicoctl node --detach=false --ip=" + cmd_ip
+        task.command.value = "./calicoctl node --detach=false " \
+                             "--node-image=%s" \
+                             "--ip=%s" % (config.node_img, cmd_ip)
         task.command.user = "root"
 
         # Add a URI for downloading the calicoctl binary
