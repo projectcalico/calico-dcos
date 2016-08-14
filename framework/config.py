@@ -41,6 +41,7 @@ class Config(object):
 
         self.installer_url = self.getenv("CALICO_INSTALLER_URL")
         self.calico_cni_binary_url = self.getenv("CALICO_CNI_BINARY_URL")
+        self.calico_cni_ipam_binary_url = self.getenv("CALICO_CNI_IPAM_BINARY_URL")
 
         self.etcd_binary_url = self.getenv("ETCD_BINARY_URL")
         self.etcd_discovery = self.getenv("ETCD_SRV")
