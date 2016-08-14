@@ -23,7 +23,6 @@ _log = logging.getLogger(__name__)
 class Config(object):
     def __init__(self):
         self._missing = []
-        self.calicoctl_url = self.getenv("CALICO_CALICOCTL_URL")
         self.node_img = self.getenv("CALICO_NODE_IMG")
         self.libnetwork_img = self.getenv("CALICO_LIBNETWORK_IMG")
         self.allow_docker_update = bool(self.getenv("CALICO_ALLOW_DOCKER_UPDATE", can_omit=True))

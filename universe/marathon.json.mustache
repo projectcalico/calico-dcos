@@ -23,7 +23,6 @@
   "mem": {{calico.mem-limit-framework}},
   "instances": 1,
   "env": {
-    "CALICO_CALICOCTL_URL": "{{resource.assets.uris.calicoctl}}",
     "CALICO_NODE_IMG":
     {{! If resource-overrides.node-image is set, use it as the node-image. }}
     {{#resource-overrides.node-image}}
