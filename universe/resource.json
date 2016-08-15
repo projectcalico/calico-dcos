@@ -16,8 +16,7 @@
       "etcd": "https://github.com/coreos/etcd/releases/download/v2.3.1/etcd-v2.3.1-linux-amd64.tar.gz",
       "calicoctl": "https://github.com/projectcalico/calico-containers/releases/download/v0.20.0/calicoctl",
       "calico-cni": "https://github.com/projectcalico/calico-cni/releases/download/v1.3.1/calico",
-      "calico-installer": "https://github.com/projectcalico/calico-mesos/releases/download/v0.1.5/installer",
-      "calico.conf": "#"
+      "calico-installer": "https://github.com/projectcalico/calico-mesos/releases/download/v0.1.5/installer"
     }
   }
 }
