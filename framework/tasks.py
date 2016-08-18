@@ -268,22 +268,17 @@ class TaskInstallCalicoCNI(Task):
     """
     hash = 0
     persistent = False
-    restarts = False
+    restarts = True
     cpus = config.cpu_limit_install
     mem = config.mem_limit_install
     description = "Calico: install CNI plugin"
 
     def as_new_mesos_task(self, agent_id):
         task = self.new_default_task(agent_id)
-        calico_conf = '{"name": "calico", "type": "calico", "ipam": { "type": "calico-ipam"}}'
-
-        commands = ["mkdir -p %s" % config.cni_plugins_dir,
-                    "cp -f ./calico %s/calico" % config.cni_plugins_dir,
-                    "cp -f ./calico %s/calico-ipam" % config.cni_plugins_dir,
-                    "echo '%s' | tee %s/calico.conf" % (calico_conf, config.cni_config_dir)]
-
-        task.command.value = ' && '.join(commands)
         task.command.user = "root"
+        task.command.value = "./installer cni %s %s" % (config.cni_plugins_dir, config.cni_config_dir)
+        if self.role == "slave_public":
+            task.command.value += " --public"
 
         # Download the Calico CNI Binary
         uri = task.command.uris.add()
@@ -292,6 +287,19 @@ class TaskInstallCalicoCNI(Task):
         uri.cache = True
         uri.extract = False
 
+        # Download Calico CNI IPAM Binary
+        uri = task.command.uris.add()
+        uri.value = config.calico_cni_ipam_binary_url
+        uri.executable = True
+        uri.cache = True
+        uri.extract = False
+
+        # Download the installer binary
+        uri = task.command.uris.add()
+        uri.value = config.installer_url
+        uri.executable = True
+        uri.cache = USE_CACHED_INSTALLER
+
         return task
 
 
@@ -299,7 +307,7 @@ class TaskRunCalicoNode(Task):
     """
     Task to run Calico node.
     """
-    hash = hashlib.sha256(config.calicoctl_url).hexdigest()
+    hash = 0
     persistent = True
     restarts = False
     cpus = config.cpu_limit_node
@@ -309,17 +317,21 @@ class TaskRunCalicoNode(Task):
     def as_new_mesos_task(self, agent_id):
         cmd_ip = "$(./installer ip %s)" % config.zk_hosts
         task = self.new_default_task(agent_id)
-        task.command.value = "./calicoctl node --detach=false " \
-                             "--node-image=%s" \
-                             "--ip=%s" % (config.node_img, cmd_ip)
-        task.command.user = "root"
 
-        # Add a URI for downloading the calicoctl binary
-        uri = task.command.uris.add()
-        uri.value = config.calicoctl_url
-        uri.executable = True 
-        uri.cache = True
-        uri.extract = False
+        task.command.value = "docker rm -f calico-node | true && " \
+                             "docker run " \
+                             "--restart=always " \
+                             "--net=host " \
+                             "--privileged " \
+                             "--name=calico-node " \
+                             "-e FELIX_IGNORELOOSERPF=true " \
+                             "-v /lib/modules:/lib/modules " \
+                             "-e IP=%s " \
+                             "-e HOSTNAME=$(hostname) " \
+                             "-e ETCD_AUTHORITY=localhost:2379 " \
+                             "-e ETCD_SCHEME=http " \
+                             "%s " % (cmd_ip, config.node_img)
+        task.command.user = "root"
 
         # Download the installer binary
         uri = task.command.uris.add()

@@ -3,16 +3,6 @@
     "calico": {
       "description": "Calico specific configuration properties.",
       "properties": {
-        "override-node-image": {
-          "type": "string",
-          "description": "Override the node image specified in resources.json",
-          "default": ""
-        },
-        "override-installer-url": {
-          "type": "string",
-          "description": "Override the URL for the installer binary.",
-          "default": ""
-        },
         "framework-name": {
           "type": "string",
           "description": "The name of the framework.",
@@ -141,12 +131,12 @@
           "type": "string"
         },
         "cni-plugins-dir": {
-          "default": "/opt/mesos/cni/bin/",
+          "default": "/opt/mesosphere/active/cni/",
           "description": "Location of CNI plugins on the Agent.",
           "type": "string"
         },
         "cni-config-dir": {
-          "default": "/opt/mesos/cni/conf/",
+          "default": "/opt/mesosphere/etc/dcos/network/cni/",
           "description": "Location of CNI configs.",
           "type": "string"
         }
@@ -157,6 +147,23 @@
         "cni-config-dir"
       ],
       "type": "object"
+    },
+    "resource-overrides": {
+      "description": "Override resources. Note: If your cluster does not have WAN and you are pre-fetching resources.json, Calico will be unable to download these files.",
+      "properties": {
+        "node-image": {
+          "type": "string",
+          "description": "Override the node image specified in resources.json"
+        },
+        "installer-url": {
+          "type": "string",
+          "description": "Override the URL for the installer binary."
+        },
+        "framework-image": {
+          "type": "string",
+          "description": "Override the docker image for the calico-dcos framework."
+        }
+      }
     }
   },
   "required": [
