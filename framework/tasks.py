@@ -326,7 +326,7 @@ class TaskRunCalicoNode(Task):
                              "--name=calico-node " \
                              "-e FELIX_IGNORELOOSERPF=true " \
                              "-v /lib/modules:/lib/modules " \
-                             "-v /var/run/calico:/var/run/calico" \
+                             "-v /var/run/calico:/var/run/calico " \
                              "-e IP=%s " \
                              "-e HOSTNAME=$(hostname) " \
                              "-e ETCD_AUTHORITY=localhost:2379 " \
