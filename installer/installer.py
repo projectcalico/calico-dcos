@@ -18,9 +18,7 @@
 Installer binary for installation tasks too complicated for bash.
 
 Usage: installer <command> [<args>...]
-
-    installer netmodules [--public]  Install netmodules libraries and activate in slave.
-    installer docker                 Configure docker with cluster store and reboot.
+    installer docker <cluster-store> Configure docker with cluster store and reboot.
     installer ip <dest-ip:port>      Return the src-IP used to access specified destination.
     installer cni <cni-plugin-dir> <cni-conf-dir> [--public]    Install CNI plugin.
 """
@@ -42,30 +40,21 @@ _log = logging.getLogger(__name__)
 
 # Calico installation config files
 INSTALLER_CONFIG_DIR = "/etc/calico/installer"
-NETMODULES_INSTALL_CONFIG = INSTALLER_CONFIG_DIR + "/netmodules"
 CNI_INSTALL_CONFIG = INSTALLER_CONFIG_DIR + "/cni"
 DOCKER_INSTALL_CONFIG = INSTALLER_CONFIG_DIR + "/docker"
 
 # Docker information for a standard Docker install.
-DOCKER_DAEMON_EXE_RE = re.compile(r"(.*/)?docker")
-DOCKER_DAEMON_PARMS_RE = re.compile(r"(--)?daemon")
 DOCKER_DAEMON_CONFIG = "/etc/docker/daemon.json"
+DOCKER_SERVICE_NAME = "docker"
 
 # Docker information for a standard Docker install.
-AGENT_EXE_RE = re.compile(r"(.*/)?mesos-slave")
-AGENT_EXE_PARMS_RE = None
 AGENT_CONFIG = "/opt/mesosphere/etc/mesos-slave-common"
 AGENT_MODULES_CONFIG = "/opt/mesosphere/etc/mesos-slave-modules.json"
 
 # Docker version regex
 DOCKER_VERSION_RE = re.compile(r"Docker version (\d+)\.(\d+)\.(\d+).*")
 
-# Netmodules information for determining correct netmodules.so
 DISTRO_INFO_FILE = "/etc/os-release"
-NETWORK_ISOLATOR_SO_BASENAME = "libmesos_network_isolator"
-
-# Fixed address for our etcd proxy.
-CLUSTER_STORE_ETCD_PROXY = "etcd://127.0.0.1:2379"
 
 # Max time for process restarts (in seconds)
 MAX_TIME_FOR_DOCKER_RESTART = 30
@@ -132,7 +121,7 @@ def docker_version_supported():
     return True
 
 
-def restart_service(service_name, process):
+def restart_service(service_name):
     """
     Restart the process using systemctl if possible (otherwise kill the
     process)
@@ -143,8 +132,7 @@ def restart_service(service_name, process):
                            paths=["/usr/bin", "/bin"])
 
     if exc and isinstance(exc, OSError):
-        _log.warning("No systemctl binary - killing process %s", process)
-        process.kill()
+        _log.error("Error restarting with systemctl")
 
 
 def start_service(service_name):
@@ -165,92 +153,30 @@ def ensure_dir(directory):
         os.makedirs(directory)
 
 
-def find_process(exe_re, parms_re):
-    """
-    Find the unique process specified by the executable and command line
-    regexes.
-
-    :param exe_re: Regex used to search for a particular executable in the
-    process list.  The exe regex is compared against the full command line
-    invocation - so executable plus arguments.
-    :param parms_re:
-    :return: The matching process, or None if no process is found.  If
-    multiple matching processes are found, this indicates an error with the
-    regex, and the script will terminate.
-    """
-    processes = []
-    for p in psutil.process_iter():
-        cmds = p.cmdline()
-        if not cmds:
-            continue
-        if not exe_re.match(cmds[0]):
-            continue
-        if not parms_re:
-            processes.append(p)
-            continue
-        parms = cmds[1:]
-        match = any(parms_re.match(parm) for parm in parms)
-        if match:
-            processes.append(p)
-            continue
-
-    _log.debug("Matched: %s", processes)
-
-    # Multiple processes suggests our query is not correct.
-    if len(processes) > 1:
-        _log.error("Found multiple matching processes: %s", exe_re)
-        sys.exit(1)
-
-    return processes[0] if processes else None
+class ProcessNotFound(Exception):
+    pass
 
 
-def wait_for_process(exe_re, parms_re, max_wait, stability_time=0,
-                     fail_if_not_found=True):
+def wait_for_service(service_name, max_wait=1):
     """
     Locate the specified process, waiting a specified max time before giving
     up.  If the process can not be found within the time limit, the script
     exits.
-    :param exe_re: Regex used to search for a particular executable in the
-    process list.  The exe regex is compared against the full command line
-    invocation - so executable plus arguments.
-    :param parms_re:
     :param max_wait:  The maximum time to wait for the process to appear.
     :param stability_time:  The time to wait to check for process stability.
-    :param fail_if_not_found: Fail the request if the process is not found
-    within the time limit.
-    :return: The matching process, or None if no process is found.  If
-    multiple matching processes are found, this indicates an error with the
-    regex, and the script will terminate.  If no processes are found, this
-    also indicates a problem and the script terminates.
+    :return:
     """
     start = time.time()
-    process = find_process(exe_re, parms_re)
-    while not process and time.time() < start + max_wait:
+    exc = 1
+    while exc and time.time() <= start + max_wait:
         time.sleep(1)
-        process = find_process(exe_re, parms_re)
+        _, exc = run_command("systemctl",
+                          args=["is-active", service_name],
+                          paths=["/usr/bin", "/bin"])
 
-    if not process:
-        _log.warning("Process not found within timeout: %s", exe_re)
-        if fail_if_not_found:
-            _log.error("Expecting process to be found, it wasn't")
-            sys.exit(1)
-        else:
-            _log.debug("Returning no process")
-            return None
-
-    if stability_time:
-        _log.debug("Waiting to check process stability")
-        time.sleep(stability_time)
-        new_process = find_process(exe_re, parms_re)
-        if not new_process:
-            _log.error("Process terminated unexpectedly: %s", process)
-            sys.exit(1)
-        if process.pid != new_process.pid:
-            _log.error("Process restarting unexpectedly: %s -> %s",
-                       process, new_process)
-            sys.exit(1)
-
-    return process
+    if exc:
+        _log.warning("Service not up within timeout: %s" % service_name)
+        raise ProcessNotFound()
 
 
 def load_config(filename):
@@ -393,154 +319,7 @@ def get_host_info():
     return mesos_version, distro, arch
 
 
-def cmd_install_netmodules(public_slave=False):
-    """
-    Install netmodules and Calico plugin.  A successful completion of the task
-    indicates successful installation
-
-    :param public_slave: Flag indicating if this is a public slave.
-    """
-    # Load the current Calico install info for Docker, and the current Docker
-    # daemon configuration.
-    install_config = load_config(NETMODULES_INSTALL_CONFIG)
-    modules_config = load_config(AGENT_MODULES_CONFIG)
-    mesos_props = load_property_file(AGENT_CONFIG)
-
-    # Before starting the install, check that we are able to locate the agent
-    # process - if not there is not much we can do here.
-    if not install_config:
-        _log.debug("Have not started installation yet")
-        # noinspection PyTypeChecker
-        agent_process = wait_for_process(AGENT_EXE_RE,
-                                         AGENT_EXE_PARMS_RE,
-                                         MAX_TIME_FOR_AGENT_RESTART,
-                                         fail_if_not_found=False)
-        if not agent_process:
-            _log.info("Cannot find agent process - do not update config")
-            return
-
-    libraries = modules_config.setdefault("libraries", [])
-    files = [library.get("file") for library in libraries]
-    if "/opt/mesosphere/lib/libmesos_network_isolator.so" not in files:
-        # Construct the desired netmodules.so file based on the host's base information
-        mesos_version, distro, arch = get_host_info()
-        if not mesos_version or not distro or not arch:
-            _log.error("Unrecognizable System. Performing a no-op for netmodules.")
-            return
-
-        network_isolator_so = "netmodules/{}-{}-{}-{}.so".format(
-            NETWORK_ISOLATOR_SO_BASENAME,
-            mesos_version,
-            distro,
-            arch)
-
-        if not os.path.exists(network_isolator_so):
-            _log.error("No matching netmodules found for this system: %s" % network_isolator_so)
-            # No-op to skip the netmodules installation.
-            return
-
-        # Flag that modules need to be updated and reset the agent create
-        # time to ensure we restart the agent.
-        _log.debug("Configure netmodules and calico in Mesos")
-        install_config["modules-updated"] = True
-        install_config["agent-created"] = None
-        store_config(NETMODULES_INSTALL_CONFIG, install_config)
-
-        # Copy the netmodules .so and the calico binary.
-        move_file_if_missing(
-            network_isolator_so,
-            "/opt/mesosphere/lib/libmesos_network_isolator.so"
-        )
-        move_file_if_missing(
-            "./calico_mesos",
-            "/calico/calico_mesos"
-        )
-
-        # Update the modules config to reference the .so
-        new_library = {
-          "file": "/opt/mesosphere/lib/libmesos_network_isolator.so",
-          "modules": [
-            {
-              "name": "com_mesosphere_mesos_NetworkIsolator",
-              "parameters": [
-                {
-                  "key": "isolator_command",
-                  "value": "/calico/calico_mesos"
-                },
-                {
-                  "key": "ipam_command",
-                  "value": "/calico/calico_mesos"
-                }
-              ]
-            },
-            {
-              "name": "com_mesosphere_mesos_NetworkHook"
-            }
-          ]
-        }
-        libraries.append(new_library)
-        store_config(AGENT_MODULES_CONFIG, modules_config)
-
-    hooks = mesos_props.setdefault("MESOS_HOOKS", [])
-    isolation = mesos_props.setdefault("MESOS_ISOLATION", [])
-    if "com_mesosphere_mesos_NetworkHook" not in hooks:
-        # Flag that properties need to be updated and reset the agent create
-        # time to ensure we restart the agent.
-        _log.debug("Configure mesos properties")
-        install_config["properties-updated"] = True
-        install_config["agent-created"] = None
-        store_config(NETMODULES_INSTALL_CONFIG, install_config)
-
-        # Finally update the properties.  We do this last, because this is what
-        # we check to see if files are copied into place.
-        isolation.append("com_mesosphere_mesos_NetworkIsolator")
-        hooks.append("com_mesosphere_mesos_NetworkHook")
-        store_property_file(AGENT_CONFIG, mesos_props)
-
-    # If nothing was updated then exit.
-    if not install_config.get("modules-updated") and \
-       not install_config.get("properties-updated"):
-        _log.debug("NetworkHook not updated by Calico")
-        return
-
-    # If we haven't stored the current agent creation time, then do so now.
-    # We use this to track when the agent has restarted with our new config.
-    if not install_config.get("agent-created"):
-        _log.debug("Store agent creation time")
-        # noinspection PyTypeChecker
-        agent_process = wait_for_process(AGENT_EXE_RE,
-                                         AGENT_EXE_PARMS_RE,
-                                         MAX_TIME_FOR_AGENT_RESTART)
-        install_config["agent-created"] = str(agent_process.create_time())
-        store_config(NETMODULES_INSTALL_CONFIG, install_config)
-
-    # Check the agent process creation time to see if it has been restarted
-    # since the config was updated.
-    _log.debug("Restart agent if not using updated config")
-    # noinspection PyTypeChecker
-    agent_process = wait_for_process(AGENT_EXE_RE,
-                                     AGENT_EXE_PARMS_RE,
-                                     MAX_TIME_FOR_AGENT_RESTART,
-                                     PROCESS_STABILITY_TIME)
-    if install_config["agent-created"] == str(agent_process.create_time()):
-        # The agent has not been restarted, so restart it now.  This will cause
-        # the task to fail (but sys.exit(1) to make sure).  The task will be
-        # relaunched, and next time will miss this branch and succeed.
-        _log.warning("Restarting agent process: %s", agent_process)
-        if public_slave:
-            restart_service("dcos-mesos-slave-public", agent_process)
-        else:
-            restart_service("dcos-mesos-slave", agent_process)
-        sys.exit(1)
-
-    _log.debug("Agent was restarted and is stable since config was updated")
-    return
-
-
-
-def cmd_install_cni(public_slave,
-                    cni_plugins_dir,
-                    cni_conf_dir):
+def cmd_install_cni(public_slave, cni_plugins_dir, cni_conf_dir, etcd_endpoints):
     """
     Install Calico's CNI plugin.  A successful completion of the task
     indicates successful installation
@@ -550,19 +329,21 @@ def cmd_install_cni(public_slave,
     # Load the current Calico install info for CNI
     install_config = load_config(CNI_INSTALL_CONFIG)
 
+    if public_slave:
+        agent_service_name = "dcos-mesos-slave-public"
+    else:
+        agent_service_name = "dcos-mesos-slave"
+
     # Before starting the install, check that we are able to locate the agent
     # process - if not there is not much we can do here.
     if not install_config:
         _log.debug("Have not started installation yet")
         # noinspection PyTypeChecker
-        agent_process = wait_for_process(AGENT_EXE_RE,
-                                         AGENT_EXE_PARMS_RE,
-                                         MAX_TIME_FOR_AGENT_RESTART,
-                                         fail_if_not_found=False)
-        if not agent_process:
+        try:
+            wait_for_service(agent_service_name, MAX_TIME_FOR_AGENT_RESTART)
+        except ProcessNotFoundException:
             _log.error("Cannot find agent process - refusing to continue.")
             sys.exit(1)
-            return
 
         mesos_version, _, _ = get_host_info()
         # CNI supported on Mesos 1.0.0+, check major release is at least 1.0.
@@ -570,7 +351,7 @@ def cmd_install_cni(public_slave,
             _log.error("Mesos version does not support CNI. Performing a no-op.")
             return
 
-        install_config["agent-created"] = None
+        install_config["restarted-agent"] = None
         install_config["cni-installed"] = None
         store_config(CNI_INSTALL_CONFIG, install_config)
 
@@ -578,6 +359,7 @@ def cmd_install_cni(public_slave,
         cni_conf = {
             "name": "calico",
             "type": "calico",
+            "etcd_endpoints": etcd_endpoints,
             "ipam": {
                 "type": "calico-ipam"
             }
@@ -591,46 +373,29 @@ def cmd_install_cni(public_slave,
 
     # If we haven't stored the current agent creation time, then do so now.
     # We use this to track when the agent has restarted with our new config.
-    if not install_config.get("agent-created"):
-        _log.debug("Store agent creation time")
-        # noinspection PyTypeChecker
-        agent_process = wait_for_process(AGENT_EXE_RE,
-                                         AGENT_EXE_PARMS_RE,
-                                         MAX_TIME_FOR_AGENT_RESTART)
-        install_config["agent-created"] = str(agent_process.create_time())
+    if not install_config.get("restarted-agent"):
+        install_config["restarted-agent"] = True
         store_config(CNI_INSTALL_CONFIG, install_config)
 
-    # Check the agent process creation time to see if it has been restarted
-    # since the config was updated.
-    _log.debug("Restart agent if not using updated config")
-    # noinspection PyTypeChecker
-    agent_process = wait_for_process(AGENT_EXE_RE,
-                                     AGENT_EXE_PARMS_RE,
-                                     MAX_TIME_FOR_AGENT_RESTART,
-                                     PROCESS_STABILITY_TIME)
-    if install_config["agent-created"] == str(agent_process.create_time()):
-        # The agent has not been restarted, so restart it now.  This will cause
-        # the task to fail (but sys.exit(1) to make sure).  The task will be
-        # relaunched, and next time will miss this branch and succeed.
-        _log.warning("Restarting agent process: %s", agent_process)
-        if public_slave:
-            restart_service("dcos-mesos-slave-public", agent_process)
-        else:
-            restart_service("dcos-mesos-slave", agent_process)
+        restart_service(agent_service_name)
         sys.exit(1)
+
+    wait_for_service(agent_service_name, MAX_TIME_FOR_AGENT_RESTART)
+    time.sleep(PROCESS_STABILITY_TIME)
+    wait_for_service(agent_service_name)
 
     _log.debug("Agent was restarted and is stable since config was updated")
     return
 
 
-def cmd_install_docker_cluster_store():
+def cmd_install_docker_cluster_store(cluster_store):
     """
     Install Docker configuration for Docker multi-host networking.  A successful
     completion of the task indicates successful installation.
     """
     # Check if the Docker version is supported.  If not, just finish the task.
     if not docker_version_supported():
-        _log.debug("Docker version is not supported - finish task")
+        _log.info("Docker version is not supported - finish task")
         return
 
     # Load the current Calico install info for Docker, and the current Docker
@@ -638,76 +403,54 @@ def cmd_install_docker_cluster_store():
     install_config = load_config(DOCKER_INSTALL_CONFIG)
     daemon_config = load_config(DOCKER_DAEMON_CONFIG)
 
-    # Before starting the install, check that we are able to locate the Docker
-    # process.  If necessary wait.
+    # Before starting the install, check that we can locate the Docker process.
     if not install_config:
         _log.debug("Have not started installation yet")
-        daemon_process = wait_for_process(DOCKER_DAEMON_EXE_RE,
-                                          DOCKER_DAEMON_PARMS_RE,
-                                          MAX_TIME_FOR_DOCKER_RESTART,
-                                          fail_if_not_found=False)
-        if not daemon_process:
-            _log.info("Docker daemon is not running - do not update config")
+        try:
+            wait_for_service(DOCKER_SERVICE_NAME, MAX_TIME_FOR_DOCKER_RESTART)
+        except ProcessNotFound:
+            _log.error("Docker is not running on this host. Refusing to continue with update.")
+            sys.exit(1)
+        # If docker already using a cluster store, we're done here.
+        if "cluster-store" in daemon_config:
+            _log.info("Docker already using cluster store. Not updating.")
             return
 
-    if "cluster-store" not in daemon_config:
-        # Before updating the config flag that config is updated, but don't yet
-        # put in the create time (we only do that after actually updating the
-        # config.
+    # Configure docker with cluster store
+    if not install_config.get("configured-docker"):
         _log.debug("Configure cluster store in daemon config")
-        install_config["docker-updated"] = True
-        install_config["docker-created"] = None
+        install_config["configured-docker"] = True
         store_config(DOCKER_INSTALL_CONFIG, install_config)
 
-        # Update the daemon config.
-        daemon_config["cluster-store"] = CLUSTER_STORE_ETCD_PROXY
+        # Set cluster-store in the daemon config.
+        daemon_config["cluster-store"] = cluster_store
         store_config(DOCKER_DAEMON_CONFIG, daemon_config)
 
-    # If Docker was already configured to use a cluster store, and not by
-    # Calico, exit now.
-    if not install_config.get("docker-updated"):
-        _log.debug("Docker not updated by Calico")
-        return
-
-    # If Docker config was updated, store the current Docker process creation
-    # time so that we can identify when Docker is restarted.
-    if not install_config.get("docker-created"):
-        _log.debug("Store docker daemon creation time")
-        daemon_process = wait_for_process(DOCKER_DAEMON_EXE_RE,
-                                          DOCKER_DAEMON_PARMS_RE,
-                                          MAX_TIME_FOR_DOCKER_RESTART)
-        install_config["docker-created"] = str(daemon_process.create_time())
+    # Restart Docker
+    if not install_config.get("docker-attempted-restart"):
+        install_config["docker-attempt-restart"] = True
         store_config(DOCKER_INSTALL_CONFIG, install_config)
 
-    # Check the Docker daemon is running.
-    daemon_process = wait_for_process(DOCKER_DAEMON_EXE_RE,
-                                      DOCKER_DAEMON_PARMS_RE,
-                                      MAX_TIME_FOR_DOCKER_RESTART,
-                                      PROCESS_STABILITY_TIME,
-                                      fail_if_not_found=False)
-    if not daemon_process and \
-       not install_config.get("docker-attempted-start"):
-        # No Docker daemon process - it must have failed to come back.
-        # We haven't tried a systemctl start so try one now.
-        _log.error("Docker process failed after restart - attempt start")
-        start_service("docker")
-        install_config["docker-attempted-restart"] = True
-        store_config(DOCKER_INSTALL_CONFIG, install_config)
-        daemon_process = wait_for_process(DOCKER_DAEMON_EXE_RE,
-                                          DOCKER_DAEMON_PARMS_RE,
-                                          MAX_TIME_FOR_DOCKER_RESTART,
-                                          PROCESS_STABILITY_TIME)
+        _log.info("Restarting Docker...")
+        restart_service(DOCKER_SERVICE_NAME)
 
-    if install_config["docker-created"] == str(daemon_process.create_time()):
-        # Docker has not been restarted, so restart it now.  This will cause
-        # the task to fail (but sys.exit(1) to make sure).  The task will be
-        # relaunched, and next time will miss this branch and succeed.
-        _log.warning("Restarting Docker process: %s", daemon_process)
-        restart_service("docker", daemon_process)
+    # Wait for docker to come back up
+    _log.info("Waiting for Docker to come back online...")
+    try:
+        wait_for_service(DOCKER_SERVICE_NAME, MAX_TIME_FOR_DOCKER_RESTART)
+    except ProcessNotFound:
+        _log.error("Expected Docker to come back up, but it did not.")
         sys.exit(1)
 
-    _log.debug("Docker was restarted and is stable since adding cluster store")
-    return
+    _log.info("Docker's back online. Waiting a bit to check that it's stable.")
+    time.sleep(PROCESS_STABILITY_TIME)
+    try:
+        wait_for_service(DOCKER_SERVICE_NAME)
+    except ProcessNotFound as e:
+        _log.error("Docker is flapping.")
+        raise e
+
+    _log.info("Docker was restarted and is stable since adding cluster store")
 
 
 def cmd_get_agent_ip():
@@ -749,19 +492,18 @@ def initialise_logging():
 
 if __name__ == "__main__":
     initialise_logging()
+    _log.info("args: %s", sys.argv)
     action = sys.argv[1]
-    if action == "netmodules":
-        public_slave = "--public" in sys.argv
-        cmd_install_netmodules(public_slave=public_slave)
-    elif action == "docker":
-        cmd_install_docker_cluster_store()
+    if action == "docker":
+        cmd_install_docker_cluster_store(cluster_store=sys.argv[2])
     elif action == "ip":
         cmd_get_agent_ip()
     elif action == "cni":
         public_slave = "--public" in sys.argv
         cmd_install_cni(public_slave=public_slave,
                         cni_plugins_dir=sys.argv[2],
-                        cni_conf_dir=sys.argv[3])
+                        cni_conf_dir=sys.argv[3],
+                        etcd_endpoints=sys.argv[4])
     else:
         print "Unexpected action: %s" % action
         sys.exit(1)
