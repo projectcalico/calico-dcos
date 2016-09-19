@@ -223,9 +223,10 @@ class TaskRunEtcdProxy(Task):
 
         return task
 
-
-class TaskInitialConfig(Task):
-    pass
+    @classmethod
+    def allowed(cls):
+        _log.debug("Allow run etcd proxy: %s", config.enable_run_etcd_proxy)
+        return config.enable_run_etcd_proxy
 
 
 class TaskInstallDockerClusterStore(Task):
@@ -235,13 +236,13 @@ class TaskInstallDockerClusterStore(Task):
     hash = 0
     persistent = False
     restarts = True
-    cpus = config.cpu_limit_install
-    mem = config.mem_limit_install
+    cpus = config.cpu_limit_install_docker
+    mem = config.mem_limit_install_docker
     description = "Calico: install Docker multi-host networking"
 
     def as_new_mesos_task(self, agent_id):
         task = self.new_default_task(agent_id)
-        task.command.value = "./installer docker"
+        task.command.value = "./installer docker %s" % config.docker_cluster_store
         task.command.user = "root"
 
         # Download the installer binary
@@ -269,14 +270,14 @@ class TaskInstallCalicoCNI(Task):
     hash = 0
     persistent = False
     restarts = True
-    cpus = config.cpu_limit_install
-    mem = config.mem_limit_install
+    cpus = config.cpu_limit_install_cni
+    mem = config.mem_limit_install_cni
     description = "Calico: install CNI plugin"
 
     def as_new_mesos_task(self, agent_id):
         task = self.new_default_task(agent_id)
         task.command.user = "root"
-        task.command.value = "./installer cni %s %s" % (config.cni_plugins_dir, config.cni_config_dir)
+        task.command.value = "./installer cni %s %s %s" % (config.cni_plugins_dir, config.cni_config_dir, config.etcd_endpoints)
         if self.role == "slave_public":
             task.command.value += " --public"
 
@@ -301,6 +302,10 @@ class TaskInstallCalicoCNI(Task):
         uri.cache = USE_CACHED_INSTALLER
 
         return task
+
+    @classmethod
+    def allowed(cls):
+        return config.enable_install_cni
 
 
 class TaskRunCalicoNode(Task):
@@ -329,9 +334,9 @@ class TaskRunCalicoNode(Task):
                              "-v /var/run/calico:/var/run/calico " \
                              "-e IP=%s " \
                              "-e HOSTNAME=$(hostname) " \
-                             "-e ETCD_AUTHORITY=localhost:2379 " \
+                             "-e ETCD_ENDPOINTS=%s " \
                              "-e ETCD_SCHEME=http " \
-                             "%s " % (cmd_ip, config.node_img)
+                             "%s " % (cmd_ip, config.etcd_endpoints, config.node_img)
         task.command.user = "root"
 
         # Download the installer binary
@@ -342,6 +347,9 @@ class TaskRunCalicoNode(Task):
 
         return task
 
+    @classmethod
+    def allowed(cls):
+        return config.enable_run_node
 
 class TaskRunCalicoLibnetwork(Task):
     """
@@ -374,6 +382,9 @@ class TaskRunCalicoLibnetwork(Task):
 
         return task
 
+    @classmethod
+    def allowed(cls):
+        return config.enable_run_libnetwork
 
 # Define the task order, and create a mapping between task name and classname
 # because we use the latter to convert a task ID to a task class.

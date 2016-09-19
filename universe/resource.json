@@ -14,8 +14,8 @@
     },
     "uris": {
       "etcd": "https://github.com/coreos/etcd/releases/download/v2.3.1/etcd-v2.3.1-linux-amd64.tar.gz",
-      "calico-cni": "https://github.com/projectcalico/calico-cni/releases/download/v1.3.1/calico",
-      "calico-ipam": "https://github.com/projectcalico/calico-cni/releases/download/v1.3.1/calico-ipam",
+      "calico-cni": "https://github.com/projectcalico/calico-cni/releases/download/v1.4.1/calico",
+      "calico-ipam": "https://github.com/projectcalico/calico-cni/releases/download/v1.4.1/calico-ipam",
       "calico-installer": "https://projectcalico.org/builds/installer"
     }
   }
