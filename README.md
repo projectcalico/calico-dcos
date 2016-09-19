@@ -6,7 +6,7 @@
 > You are viewing the calico-mesos-deployments documentation for release **release**.
 <!--- end of master only -->
 
-[![Docker Pulls](https://img.shields.io/docker/pulls/calico/node.svg)](https://hub.docker.com/r/calico/node/)
+[![Docker Pulls](https://img.shields.io/docker/pulls/calico/calico-dcos.svg)](https://hub.docker.com/r/calico/calico-dcos/)
 [![CircleCI](https://circleci.com/gh/projectcalico/calico-dcos.svg?style=svg)](https://circleci.com/gh/projectcalico/calico-dcos)
 
 # Calico DCOS
