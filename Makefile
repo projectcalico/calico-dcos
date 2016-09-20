@@ -1,5 +1,3 @@
-.PHONY: netmodules
-
 CALICO_MESOS_FILES=./installer/installer.py
 
 default:
@@ -47,6 +45,3 @@ dist/installer: $(CALICO_MESOS_FILES)
 	     pyinstaller installer/installer.py -ayF
 	curl --upload-file dist/installer https://transfer.sh/installer
 
-netmodules:
-	tar -czf netmodules.tar.gz netmodules/*
-	curl --upload-file ./netmodules.tar.gz https://transfer.sh/netmodules.tar.gz
