@@ -19,7 +19,7 @@
           "default": 1
         },
         "zk": {
-          "default": "zk://master.mesos:2181/calico",
+          "default": "zk://zk-1.zk:2181/calico",
           "description": "The URL of Zookeeper to be used to persist Calico framework data. The format is a comma-delimited list of hosts like zk://host1:port,host2:port/calico, including the trailing path.",
           "type": "string"
         },
