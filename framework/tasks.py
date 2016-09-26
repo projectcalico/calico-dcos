@@ -374,6 +374,14 @@ class TaskRunCalicoLibnetwork(Task):
         task.container.docker.privileged = True
         task.command.shell = False
 
+        parameter = task.container.docker.parameters.add()
+        parameter.key = "env"
+        parameter.value = "ETCD_ENDPOINTS=%s" % config.etcd_endpoints
+
+        parameter = task.container.docker.parameters.add()
+        parameter.key = "env"
+        parameter.value = "ETCD_SCHEME=http"
+
         # Volume mount in /run/docker/plugins
         volume = task.container.volumes.add()
         volume.mode = mesos_pb2.Volume.RW
