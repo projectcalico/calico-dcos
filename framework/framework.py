@@ -99,7 +99,7 @@ class Agent(object):
            networking (this will restart Docker if necessary)
         -  Once Docker is updated, we can install net-modules and Calico plugin
            on the agent (this will restart the Agent if necessary)
-        -  Then Calico node and Calico libetwork driver can be started.
+        -  Then Calico node can be started.
 
         All failed tasks are rescheduled until:
         -  Non-persistent tasks finish successfully

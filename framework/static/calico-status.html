@@ -36,15 +36,12 @@ function refreshTable() {
 
 function buildNodeRow(nodeID, node) {
   nodeStatus = -1;
-  libnetworkStatus = -1;
   etcdProxyStatus = -1;
   cniInstallStatus = -1;
   dockerInstallStatus = -1;
 
   if ("TaskRunCalicoNode" in node)
     nodeStatus = node["TaskRunCalicoNode"]["state"]
-  if ("TaskRunCalicoLibnetwork" in node)
-    libnetworkStatus = node["TaskRunCalicoLibnetwork"]["state"]
   if ("TaskRunEtcdProxy" in node)
     etcdProxyStatus = node["TaskRunEtcdProxy"]["state"]
   if ("TaskInstallCalicoCNI" in node)
@@ -56,7 +53,6 @@ function buildNodeRow(nodeID, node) {
     "<tr id='" + nodeID + "'>" +
       "<td>" + nodeID + "</td>" +
       "<td>" + statusIdToString(nodeStatus) + "</td>" +
-      "<td>" + statusIdToString(libnetworkStatus) + "</td>" +
       "<td>" + statusIdToString(etcdProxyStatus) + "</td>" +
       "<td>" + statusIdToString(cniInstallStatus) + "</td>" +
       "<td>" + statusIdToString(dockerInstallStatus) + "</td>" +
@@ -111,7 +107,6 @@ $(document).ready(function() {
           <tr>
             <th>Agent</th>
             <th>Calico networking</th>
-            <th>Docker network driver</th>
             <th>Etcd Proxy</th>
             <th>CNI Install</th>
             <th>Docker Install</th>

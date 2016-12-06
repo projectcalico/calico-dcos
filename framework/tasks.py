@@ -332,6 +332,9 @@ class TaskRunCalicoNode(Task):
                              "-e FELIX_IGNORELOOSERPF=true " \
                              "-v /lib/modules:/lib/modules " \
                              "-v /var/run/calico:/var/run/calico " \
+                             "-v /run/docker/plugins:/run/docker/plugins " \
+                             "-v /var/run/docker.sock:/var/run/docker.sock " \
+                             "-e CALICO_LIBNETWORK_ENABLED=true " \
                              "-e IP=%s " \
                              "-e HOSTNAME=$(hostname) " \
                              "-e ETCD_ENDPOINTS=%s " \
@@ -351,57 +354,13 @@ class TaskRunCalicoNode(Task):
     def allowed(cls):
         return config.enable_run_node
 
-class TaskRunCalicoLibnetwork(Task):
-    """
-    Task to run an Calico libnetwork.
-    """
-    persistent = True
-    restarts = False
-    cpus = config.cpu_limit_libnetwork
-    mem = config.mem_limit_libnetwork
-    description = "Calico: Docker networking driver"
-    hash = hashlib.sha256(config.libnetwork_img).hexdigest()
-
-    def as_new_mesos_task(self, agent_id):
-        """
-        Take the information stored in this Task object and fill a
-        mesos task.
-        """
-        task = self.new_default_task(agent_id)
-
-        task.container.type = mesos_pb2.ContainerInfo.DOCKER
-        task.container.docker.image = config.libnetwork_img
-        task.container.docker.privileged = True
-        task.command.shell = False
-
-        parameter = task.container.docker.parameters.add()
-        parameter.key = "env"
-        parameter.value = "ETCD_ENDPOINTS=%s" % config.etcd_endpoints
-
-        parameter = task.container.docker.parameters.add()
-        parameter.key = "env"
-        parameter.value = "ETCD_SCHEME=http"
-
-        # Volume mount in /run/docker/plugins
-        volume = task.container.volumes.add()
-        volume.mode = mesos_pb2.Volume.RW
-        volume.container_path = "/run/docker/plugins"
-        volume.host_path = "/run/docker/plugins"
-
-        return task
-
-    @classmethod
-    def allowed(cls):
-        return config.enable_run_libnetwork
-
 # Define the task order, and create a mapping between task name and classname
 # because we use the latter to convert a task ID to a task class.
 TASK_ORDER = [
     TaskRunEtcdProxy,
     TaskInstallDockerClusterStore,
     TaskInstallCalicoCNI,
-    TaskRunCalicoNode,
-    TaskRunCalicoLibnetwork
+    TaskRunCalicoNode
 ]
 TASKS_BY_CLASSNAME = {cls.__name__: cls for cls in TASK_ORDER}
 
