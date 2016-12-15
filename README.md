@@ -12,6 +12,6 @@
 # Calico DCOS
 This repo is home to Calico's installer framework for DC/OS. When launched by the DC/OS Universe, this framework installs all components necessary to run calico networked tasks in DC/OS.
 
-See the [Calico DC/OS Installation Guide](https://github.com/projectcalico/calico-containers/blob/master/docs/mesos/DCOS.md) for information on how to use Calico-DC/OS.
+See the [Calico DC/OS Installation Guide](http://docs.projectcalico.org/v2.0/getting-started/mesos/installation/dc-os/) for information on how to use Calico-DC/OS.
 
 [![Analytics](https://calico-ga-beacon.appspot.com/UA-52125893-3/calico-dcos/README.md?pixel)](https://github.com/igrigorik/ga-beacon)
