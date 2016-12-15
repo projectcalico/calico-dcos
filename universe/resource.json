@@ -7,7 +7,7 @@
   "assets": {
     "container": {
       "docker": {
-        "calico-dcos": "calico/calico-dcos:latest",
+        "calico-dcos": "calico/calico-dcos:v0.4.0",
         "calico-node": "calico/node:v1.0.0"
       }
     },
@@ -15,7 +15,7 @@
       "etcd": "https://github.com/coreos/etcd/releases/download/v2.3.1/etcd-v2.3.1-linux-amd64.tar.gz",
       "calico-cni": "https://github.com/projectcalico/calico-cni/releases/download/v1.5.5/calico",
       "calico-ipam": "https://github.com/projectcalico/calico-cni/releases/download/v1.5.5/calico-ipam",
-      "calico-installer": "https://projectcalico.org/builds/installer"
+      "calico-installer": "https://github.com/projectcalico/calico-dcos/releases/download/v0.4.0/installer"
     }
   }
 }
