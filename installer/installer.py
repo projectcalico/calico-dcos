@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-# Copyright 2015 Metaswitch Networks
+# Copyright 2015 Tigera, Inc
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -296,7 +296,7 @@ def get_host_info():
     _log.info("Arch: %s", arch)
 
     # Get Mesos Version. (We use mesos-master since mesos-slave --version
-    # fails unless --work-dir is also passed in: 
+    # fails unless --work-dir is also passed in:
     # https://issues.apache.org/jira/browse/MESOS-5928)
     raw_mesos_version, _ = run_command("mesos-master", args=["--version"],
                                        paths=["/opt/mesosphere/bin"])
